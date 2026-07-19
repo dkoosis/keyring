@@ -61,6 +61,15 @@ func WithTimeout(d time.Duration) Option {
 	return func(s *Store) { s.timeout = d }
 }
 
+// WithSecurityBin overrides the path to the `security` binary. FOR TESTS
+// ONLY — it exists so consumers can point a Store at a stub and assert the
+// CLI contract. Production code must keep the default absolute path; a
+// relative or $PATH-resolved override reopens the PATH-hijack hole the
+// default exists to close.
+func WithSecurityBin(path string) Option {
+	return func(s *Store) { s.securityBin = path }
+}
+
 // New returns a Store scoped to the given keychain service name. The service
 // name is the namespace every account lives under — convention: the consuming
 // app's name (service "ferret", account "anthropic"). Empty or whitespace-only
