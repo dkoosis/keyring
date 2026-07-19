@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const supported = true
@@ -30,7 +31,12 @@ const notFoundExit = 44
 func (s *Store) get(account string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, s.securityBin, "find-generic-password", "-s", s.service, "-a", account, "-w").Output()
+	cmd := exec.CommandContext(ctx, s.securityBin, "find-generic-password", "-s", s.service, "-a", account, "-w")
+	// WaitDelay bounds the wait for the stdout pipe to close AFTER the context
+	// kills the process: a grandchild inheriting the pipe (or a wedged kernel
+	// call) would otherwise hold Output() open past the deadline.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
 	if err != nil {
 		if isNotFound(err) {
 			return "", fmt.Errorf("keyring: %q %w under service %q", account, ErrNotFound, s.service)
@@ -51,6 +57,7 @@ func (s *Store) write(account, value string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.securityBin, "add-generic-password", "-U", "-s", s.service, "-a", account, "-w")
+	cmd.WaitDelay = time.Second // see get: bound the post-kill pipe wait
 	cmd.Stdin = strings.NewReader(value + "\n" + value + "\n")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("keyring: storing %q: %w", account, err)
