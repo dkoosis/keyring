@@ -3,6 +3,7 @@
 package keyring
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -637,6 +638,149 @@ func TestGetOrEnv_FallbackRules(t *testing.T) {
 			t.Errorf("locked keychain must surface, not downgrade to env; got %v", err)
 		}
 	})
+}
+
+// dumpKeychainFixture is a synthetic `security dump-keychain` transcript
+// covering: a "ferret/anthropic" item duplicated across two keychains (login
+// + system), a "ferret/github" item present only once, and an unrelated
+// "other/x" item that List/DumpDuplicates must filter out by service. Shaped
+// after real `security dump-keychain` output — quoted 4-char attribute keys,
+// a numeric-alias line ignored by the parser, and a "data:" section the
+// parser must never read past.
+const dumpKeychainFixture = `keychain: "/Users/x/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    0x00000007 <blob>="ferret"
+    "acct"<blob>="anthropic"
+    "cdat"<timedate>=0x32303236303731333030303030305A00
+    "svce"<blob>="ferret"
+    "type"<uint32>=<NULL>
+data:
+"70617373776f7264"
+keychain: "/Users/x/Library/Keychains/system.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="anthropic"
+    "svce"<blob>="ferret"
+data:
+"6f74686572"
+keychain: "/Users/x/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="github"
+    "svce"<blob>="ferret"
+data:
+"6162630a"
+keychain: "/Users/x/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="x"
+    "svce"<blob>="other"
+data:
+"78797a"
+`
+
+func TestList_ReturnsOnlyItemsForThisService(t *testing.T) {
+	bin, _ := stubSecurity(t, "cat <<'EOF'\n"+dumpKeychainFixture+"EOF\nexit 0\n")
+	s, err := New("ferret", WithSecurityBin(bin))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := s.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("List returned %d items, want 3: %+v", len(items), items)
+	}
+	for _, it := range items {
+		if it.Account == "x" {
+			t.Errorf("List leaked an item from another service: %+v", it)
+		}
+	}
+}
+
+func TestList_HonorsWithKeychainArgv(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s, err := New("ferret", WithSecurityBin(bin), WithKeychain("/Users/x/Library/Keychains/login.keychain-db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.List(context.Background()); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	wantArgv := "dump-keychain\n/Users/x/Library/Keychains/login.keychain-db\n"
+	if argv := readCapture(t, dir, "argv"); argv != wantArgv {
+		t.Errorf("argv = %q, want %q", argv, wantArgv)
+	}
+}
+
+func TestList_NoKeychainPinDumpsWholeSearchList(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s, err := New("ferret", WithSecurityBin(bin))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.List(context.Background()); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	wantArgv := "dump-keychain\n"
+	if argv := readCapture(t, dir, "argv"); argv != wantArgv {
+		t.Errorf("argv = %q, want %q — List must never pass -w", argv, wantArgv)
+	}
+}
+
+func TestList_FailureIsUnreadable(t *testing.T) {
+	bin, _ := stubSecurity(t, "exit 1\n")
+	s, err := New("ferret", WithSecurityBin(bin))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.List(context.Background()); !errors.Is(err, ErrUnreadable) {
+		t.Errorf("want ErrUnreadable, got %v", err)
+	}
+}
+
+func TestDumpDuplicates_FindsDuplicatePair(t *testing.T) {
+	bin, _ := stubSecurity(t, "cat <<'EOF'\n"+dumpKeychainFixture+"EOF\nexit 0\n")
+
+	groups, err := DumpDuplicates(context.Background(), "ferret", WithSecurityBin(bin))
+	if err != nil {
+		t.Fatalf("DumpDuplicates: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("DumpDuplicates returned %d groups, want 1: %+v", len(groups), groups)
+	}
+	g := groups[0]
+	if g.Service != "ferret" || g.Account != "anthropic" {
+		t.Errorf("group = %+v, want service=ferret account=anthropic", g)
+	}
+	if len(g.Items) != 2 {
+		t.Errorf("group has %d items, want 2", len(g.Items))
+	}
+}
+
+// TestDumpDuplicates_IgnoresPinnedKeychainArgv pins the "always whole search
+// list" contract: a WithKeychain option must never reach dump-keychain's
+// argv, or DumpDuplicates could miss the very duplicate it exists to find.
+func TestDumpDuplicates_IgnoresPinnedKeychainArgv(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+
+	if _, err := DumpDuplicates(context.Background(), "ferret", WithSecurityBin(bin), WithKeychain("/Users/x/Library/Keychains/login.keychain-db")); err != nil {
+		t.Fatalf("DumpDuplicates: %v", err)
+	}
+	wantArgv := "dump-keychain\n"
+	if argv := readCapture(t, dir, "argv"); argv != wantArgv {
+		t.Errorf("argv = %q, want %q — DumpDuplicates must ignore WithKeychain", argv, wantArgv)
+	}
 }
 
 func TestSupported_Darwin(t *testing.T) {

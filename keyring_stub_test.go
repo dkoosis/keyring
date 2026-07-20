@@ -3,6 +3,7 @@
 package keyring
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -23,6 +24,12 @@ func TestStub_AllOpsReturnUnsupported(t *testing.T) {
 	}
 	if _, err := s.Has("a"); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("Has: want ErrUnsupported err, got %v", err)
+	}
+	if _, err := s.List(context.Background()); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("List: want ErrUnsupported, got %v", err)
+	}
+	if _, err := DumpDuplicates(context.Background(), "a"); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("DumpDuplicates: want ErrUnsupported, got %v", err)
 	}
 }
 

@@ -132,6 +132,25 @@ func errDisabled() error {
 	return fmt.Errorf("keyring: disabled by %s: %w", DisableEnv, ErrUnsupported)
 }
 
+// Item is one keychain entry's public attributes: the account name and the
+// keychain file it lives in. Never carries secret bytes — List and
+// DumpDuplicates populate it from `security dump-keychain` output WITHOUT
+// -w, so there is nothing else to attach.
+type Item struct {
+	Account  string
+	Keychain string // absolute path to the keychain file this item lives in
+}
+
+// DuplicateGroup is every item found under one (service, account) pair when
+// more than one exists across the search list — the ambiguity WithKeychain
+// exists to close (see WithKeychain's doc comment). DumpDuplicates only ever
+// returns groups with len(Items) > 1.
+type DuplicateGroup struct {
+	Service string
+	Account string
+	Items   []Item
+}
+
 // Store reads and writes secrets under one keychain service name.
 type Store struct {
 	service     string
@@ -206,7 +225,11 @@ func New(service string, opts ...Option) (*Store, error) {
 	if s.timeout <= 0 {
 		return nil, fmt.Errorf("keyring: WithTimeout must be positive, got %s", s.timeout)
 	}
-	if !filepath.IsAbs(s.securityBin) {
+	// Only meaningful where a backend exists: non-darwin builds have no
+	// security binary at all (defaultSecurityBin is ""), and New must still
+	// succeed there so cross-platform callers can construct a Store and let
+	// GetOrEnv fall through to the environment.
+	if supported && !filepath.IsAbs(s.securityBin) {
 		return nil, fmt.Errorf("keyring: WithSecurityBin must be an absolute path, got %q", s.securityBin)
 	}
 	if s.keychain != "" && !filepath.IsAbs(s.keychain) {

@@ -4,6 +4,7 @@ package keyring
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -209,4 +210,225 @@ func isDuplicateItem(err error, stderr string) bool {
 		return true
 	}
 	return strings.Contains(stderr, duplicateItemStderrMessage)
+}
+
+// List returns every item under this store's service, found via `security
+// dump-keychain` — WITHOUT -w, so only attributes (account, keychain path)
+// are read; no code path here ever touches secret bytes. When a keychain is
+// pinned via WithKeychain, List scopes dump-keychain to just that file
+// (dump-keychain's trailing positional argument, same shape as get/write);
+// otherwise it dumps the whole default search list.
+func (s *Store) List(ctx context.Context) ([]Item, error) {
+	if disabled() {
+		return nil, errDisabled()
+	}
+	out, err := s.runDumpKeychain(ctx, s.keychain)
+	if err != nil {
+		return nil, err
+	}
+	var items []Item
+	for _, e := range parseDumpKeychain(out) {
+		if e.service == s.service {
+			items = append(items, Item{Account: e.account, Keychain: e.keychain})
+		}
+	}
+	return items, nil
+}
+
+// DumpDuplicates scans the WHOLE keychain search list — never a single
+// pinned keychain, which would defeat its purpose — for every item under
+// service, groups by account, and returns only the groups with more than
+// one item. This is the primitive doctor's duplicate-item check (design §4
+// check 4) is built on: a duplicate (service, account) pair across the
+// search list is exactly the ambiguity WithKeychain exists to close (see
+// WithKeychain's doc comment). Uses `security dump-keychain` without -w:
+// attributes only, no secret bytes read.
+//
+// opts configures the underlying Store used to run the command (timeout,
+// WithSecurityBin for tests); any WithKeychain passed in opts is ignored —
+// DumpDuplicates always scans the full search list regardless.
+func DumpDuplicates(ctx context.Context, service string, opts ...Option) ([]DuplicateGroup, error) {
+	if disabled() {
+		return nil, errDisabled()
+	}
+	s, err := New(service, opts...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.runDumpKeychain(ctx, "") // "" = whole search list, always
+	if err != nil {
+		return nil, err
+	}
+	byAccount := map[string][]Item{}
+	var order []string
+	for _, e := range parseDumpKeychain(out) {
+		if e.service != service {
+			continue
+		}
+		if _, seen := byAccount[e.account]; !seen {
+			order = append(order, e.account)
+		}
+		byAccount[e.account] = append(byAccount[e.account], Item{Account: e.account, Keychain: e.keychain})
+	}
+	var groups []DuplicateGroup
+	for _, acct := range order {
+		items := byAccount[acct]
+		if len(items) > 1 {
+			groups = append(groups, DuplicateGroup{Service: service, Account: acct, Items: items})
+		}
+	}
+	return groups, nil
+}
+
+// runDumpKeychain runs `security dump-keychain` — WITHOUT -w and WITHOUT -d,
+// so the "data:" section (if present at all) is never populated with the
+// actual secret bytes; this command line cannot read a value even by
+// accident. keychain, if non-empty, is appended as dump-keychain's trailing
+// positional argument to scope the dump to one file; empty means the whole
+// default search list.
+//
+// A non-zero exit here is classified as ErrUnreadable, not ErrNotFound:
+// unlike find-generic-password, dump-keychain has no "confirmed absent"
+// outcome to detect — an empty keychain dumps successfully with empty
+// output — so any failure means the dump itself could not be read (locked,
+// denied, timed out, or a bad --keychain path).
+func (s *Store) runDumpKeychain(ctx context.Context, keychain string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	args := []string{"dump-keychain"}
+	if keychain != "" {
+		args = append(args, keychain)
+	}
+	cmd := exec.CommandContext(ctx, s.securityBin, args...)
+	// WaitDelay bounds the wait for the stdout pipe to close AFTER the context
+	// kills the process — see get's identical rationale.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("keyring: dump-keychain: %w", ErrUnreadable)
+	}
+	return string(out), nil
+}
+
+// dumpEntry is one parsed `security dump-keychain` record: enough to build
+// an Item, plus the service name List/DumpDuplicates filter on.
+type dumpEntry struct {
+	keychain string
+	service  string
+	account  string
+}
+
+// dumpKeychainClass is the item class dump-keychain reports for a generic
+// password (as opposed to "inet", an internet password) — the only class
+// this package's Set/Get/List ever create or read.
+const dumpKeychainClass = "genp"
+
+// parseDumpKeychain parses `security dump-keychain` output (attributes
+// only — see runDumpKeychain) into entries. Liberal in what it tolerates:
+// unknown attribute keys, attribute lines it doesn't recognize, and
+// keychains with zero items are all fine. Strict in what it emits: only
+// "genp" entries with BOTH svce and acct populated become a dumpEntry, and
+// parsing never looks past a "data:" line — even if a caller somehow ran
+// this against dump-keychain -d output, the value bytes are never read.
+//
+// Each record in the real output looks like:
+//
+//	keychain: "/Users/x/Library/Keychains/login.keychain-db"
+//	version: 512
+//	class: "genp"
+//	attributes:
+//	    "acct"<blob>="anthropic"
+//	    ...
+//	    "svce"<blob>="ferret"
+//	data:
+//	<not parsed — see above>
+func parseDumpKeychain(out string) []dumpEntry {
+	var entries []dumpEntry
+	var keychain, class, service, account string
+	inAttrs := false
+	flush := func() {
+		if class == dumpKeychainClass && service != "" && account != "" {
+			entries = append(entries, dumpEntry{keychain: keychain, service: service, account: account})
+		}
+		class, service, account = "", "", ""
+		inAttrs = false
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "keychain: "):
+			flush()
+			keychain = unquoteDump(strings.TrimPrefix(trimmed, "keychain: "))
+		case strings.HasPrefix(trimmed, "class: "):
+			class = unquoteDump(strings.TrimPrefix(trimmed, "class: "))
+		case trimmed == "attributes:":
+			inAttrs = true
+		case trimmed == "data:":
+			inAttrs = false // never parse past this point — see doc comment
+		case inAttrs:
+			if k, v, ok := parseDumpAttrLine(trimmed); ok {
+				switch k {
+				case "svce":
+					service = v
+				case "acct":
+					account = v
+				}
+			}
+		}
+	}
+	flush()
+	return entries
+}
+
+// parseDumpAttrLine parses one attribute line of the form
+// `"key"<type>=value`, where value is a double-quoted string, <NULL>, or a
+// 0x-prefixed hex blob. Lines in other forms (including the numeric
+// 0x00000007-style key alias dump-keychain also emits for some attributes)
+// are not recognized and return ok=false — parseDumpKeychain only needs the
+// quoted-key "acct"/"svce" form, which is what current `security` emits.
+func parseDumpAttrLine(line string) (key, value string, ok bool) {
+	if !strings.HasPrefix(line, `"`) {
+		return "", "", false
+	}
+	rest := line[1:]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return "", "", false
+	}
+	key = rest[:end]
+	rest = rest[end+1:]
+	_, after, found := strings.Cut(rest, "=")
+	if !found {
+		return "", "", false
+	}
+	raw := strings.TrimSpace(after)
+	switch {
+	case raw == "<NULL>":
+		return key, "", true
+	case strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`) && len(raw) >= 2:
+		return key, unquoteDump(raw), true
+	case strings.HasPrefix(raw, "0x"):
+		// A hex-encoded blob — dump-keychain's fallback rendering for a value
+		// that isn't cleanly printable. account/service names are ASCII by
+		// this package's own contract, so this is a defensive decode for
+		// items written by another tool, not the expected path.
+		if b, err := hex.DecodeString(raw[2:]); err == nil {
+			return key, string(b), true
+		}
+		return key, "", true
+	default:
+		return key, raw, true
+	}
+}
+
+// unquoteDump strips a double-quoted dump-keychain token and unescapes the
+// two sequences `security` emits inside one: `\"` and `\\`.
+func unquoteDump(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`) {
+		s = s[1 : len(s)-1]
+		s = strings.ReplaceAll(s, `\"`, `"`)
+		s = strings.ReplaceAll(s, `\\`, `\`)
+	}
+	return s
 }
