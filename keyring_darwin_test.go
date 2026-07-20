@@ -141,7 +141,7 @@ exit 0
 	if err := s.Set("acct", "s3cret"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	// The secret must arrive on stdin (twice, prompt protocol), never on argv.
+	// The secret must arrive on stdin (as a `security -i` command), never on argv.
 	if argv := readCapture(t, dir, "argv"); strings.Contains(argv, "s3cret") {
 		t.Fatalf("SECRET ON ARGV: %q", argv)
 	}
@@ -152,15 +152,56 @@ exit 0
 	if err := sw.write("acct", "s3cret"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if stdin := readCapture(t, dirW, "stdin"); stdin != "s3cret\ns3cret\n" {
-		t.Errorf("stdin = %q, want two-line prompt protocol", stdin)
+	// The whole add command — secret included, quoted — is fed to `security -i`
+	// on stdin. NOT the readpassphrase prompt: that path silently truncates
+	// values >128 bytes (caught live by read-back verify on a ~1kB JWT).
+	wantStdin := `add-generic-password -U -s "keyring-test" -a "acct" -w "s3cret"` + "\n"
+	if stdin := readCapture(t, dirW, "stdin"); stdin != wantStdin {
+		t.Errorf("stdin = %q, want %q", stdin, wantStdin)
 	}
 	if argv := readCapture(t, dirW, "argv"); strings.Contains(argv, "s3cret") {
 		t.Fatalf("SECRET ON ARGV: %q", argv)
 	}
-	wantArgv := "add-generic-password\n-U\n-s\nkeyring-test\n-a\nacct\n-w\n"
-	if argv := readCapture(t, dirW, "argv"); argv != wantArgv {
-		t.Errorf("write argv = %q, want %q", argv, wantArgv)
+	// Argv carries only the interactive-mode flag.
+	if argv := readCapture(t, dirW, "argv"); argv != "-i\n" {
+		t.Errorf("write argv = %q, want %q", argv, "-i\n")
+	}
+}
+
+// TestQuoteToken pins the `security -i` tokenizer escaping: backslash and
+// double quote escaped, everything else literal inside the quotes.
+func TestQuoteToken(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`plain`, `"plain"`},
+		{`pa"ss`, `"pa\"ss"`},
+		{`pa\ss`, `"pa\\ss"`},
+		{`sp ace$var`, `"sp ace$var"`},
+	}
+	for _, c := range cases {
+		if got := quoteToken(c.in); got != c.want {
+			t.Errorf("quoteToken(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestSet_RejectsControlChars: a newline would terminate the `security -i`
+// command line and could smuggle a second command; Set must refuse before
+// any process runs.
+func TestSet_RejectsControlChars(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, bad := range []string{"line1\nline2", "cr\rlf", "nul\x00byte", "tab\tsep"} {
+		if err := s.Set("acct", bad); err == nil {
+			t.Errorf("Set(%q): no error; control characters must be rejected", bad)
+		}
+	}
+	if err := s.Set("bad\naccount", "v"); err == nil {
+		t.Error("Set with newline in account: no error; must be rejected")
+	}
+	// No security invocation may have happened for rejected inputs — the stub
+	// writes its argv capture on every call, so the file must not exist.
+	if _, err := os.Stat(filepath.Join(dir, "argv")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("security was invoked for rejected input (argv capture exists, stat err=%v)", err)
 	}
 }
 
@@ -263,25 +304,26 @@ func TestSupported_Darwin(t *testing.T) {
 }
 
 // TestLiveKeychain exercises the real /usr/bin/security end-to-end. Opt-in:
-// requires KEYRING_LIVE_E2E=1 and an interactive session — `security`(1)
-// reads /dev/tty for its stdin password prompt, so this cannot run headless.
+// requires KEYRING_LIVE_E2E=1 and an unlocked login keychain. Runs headless —
+// the `security -i` write path needs no tty (the old readpassphrase prompt,
+// which did, also silently truncated values >128 bytes; see write).
 func TestLiveKeychain(t *testing.T) {
 	if os.Getenv("KEYRING_LIVE_E2E") != "1" {
 		t.Skip("set KEYRING_LIVE_E2E=1 to run the live keychain test")
-	}
-	if _, err := os.Open("/dev/tty"); err != nil {
-		t.Skip("no /dev/tty: security(1) cannot prompt; run interactively")
 	}
 	s, err := New("keyring-live-test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const acct, val = "e2e", "live-round-trip"
+	// A JWT-sized value: the exact shape the truncation bug ate in the wild
+	// (Intuit access tokens via canapay). 100-char values masked the bug.
+	val := "eyJhbGciOi." + strings.Repeat("Abc123_-", 128) + ".sig"
+	const acct = "e2e"
 	if err := s.Set(acct, val); err != nil {
 		t.Fatalf("live Set: %v", err)
 	}
 	got, err := s.Get(acct)
 	if err != nil || got != val {
-		t.Fatalf("live Get = (%q, %v), want (%q, nil)", got, err, val)
+		t.Fatalf("live Get: err=%v, len(got)=%d, want len=%d matched", err, len(got), len(val))
 	}
 }
