@@ -36,6 +36,64 @@ The not-found/unreadable split is a best-effort classification of the Darwin
 `security` CLI (exit status + stderr text). It is reliable on stock macOS,
 but it is a CLI heuristic, not an OS guarantee.
 
+## The CLI
+
+`go install github.com/dkoosis/keyring/cmd/keyring@latest` — the same
+guarantees as the library (it IS the library underneath), no `security(1)`
+incantation anywhere. Every failure message ends with the next command to
+run.
+
+**First-time setup** — store a key, prove it landed:
+
+```sh
+keyring set myapp anthropic     # hidden prompt; strips a pasted trailing newline
+keyring get myapp anthropic     # masked receipt; --raw to reveal
+```
+
+**"My app can't find its key":**
+
+```sh
+keyring doctor myapp
+```
+
+Doctor names what's wrong — missing item, locked keychain, duplicate items,
+a stale env var shadowing the keychain, a value with a pasted newline — and
+prints the exact fix for each. With a `keyring.json` manifest in the repo it
+also diffs expected vs. stored accounts and tells you where to obtain each
+missing credential. `--fix` applies the safe repairs after a per-item
+confirm.
+
+**"I think my key is wrong":**
+
+```sh
+keyring get myapp anthropic --raw   # compare with the source of truth
+keyring set myapp anthropic --force # overwrite; read-back verified
+```
+
+**Cleaning up legacy items** (old `myapp-anthropic`-style names, duplicates,
+pasted newlines) — plan first, nothing applies before one confirmation:
+
+```sh
+keyring migrate myapp
+```
+
+**Agent-driven setup** — no TTY, everything from exit code + `--json`:
+
+```sh
+printf %s "$KEY" | keyring set myapp anthropic --stdin --json  # verified:true
+keyring doctor myapp --json                                    # exit 8 → findings[]
+keyring doctor myapp --fix --yes --json                        # heal, receipts
+```
+
+Exit codes are stable and map 1:1 to the library sentinels:
+`0` ok · `2` validation · `3` not found · `4` unreadable/locked ·
+`5` verify failed · `6` already exists · `7` unsupported/disabled ·
+`8` doctor/migrate found unresolved problems.
+
+Destructive actions (`rm`, `--fix`, `migrate`) confirm on a terminal and
+fail closed without `--yes` when piped — an agent can never delete or
+rewrite an item by accident.
+
 ## Set vs. SetIfAbsent
 
 `Set` writes with `-U` (update-if-exists) — it always succeeds against an
@@ -69,10 +127,10 @@ silently downgrading to env.
 - **account** = the secret's purpose (`anthropic`, `github`).
 - **env fallback** = `<APP>_<PROVIDER>_API_KEY` (`MYAPP_ANTHROPIC_API_KEY`).
 
-Store a secret from a terminal (value prompted, off argv):
+Store a secret from a terminal (value prompted hidden, off argv):
 
 ```sh
-security add-generic-password -U -s myapp -a anthropic -w
+keyring set myapp anthropic
 ```
 
 ## Single-item precondition
