@@ -96,17 +96,23 @@ func quoteToken(s string) string {
 
 // notFoundStderrMessage is the EXACT text `security` emits on some builds
 // for a confirmed item-not-found when it exits non-44 instead. isNotFound
-// anchors to this full message, not a substring: a substring match
+// requires this FULL sentence, not a fragment: a fragment match
 // ("could not be found") can also appear in an unrelated failure — a locked
 // keychain, a denied access dialog, or a future/localized reword — and
 // wrongly classify an unreadable keychain as a confirmed absence (kr-jqi).
 // That flips the ErrNotFound/ErrUnreadable invariant: Has would report
 // safe-to-overwrite over a slot that may hold a live secret.
+//
+// Contains, not equality, on the full sentence: macOS tools routinely emit
+// unrelated stderr noise (dyld/objc warnings) alongside the real message, and
+// an exact match would misread a genuine absence as ErrUnreadable — breaking
+// GetOrEnv's env fallback. The complete sentence is specific enough that a
+// locked/denied error cannot plausibly contain it whole.
 const notFoundStderrMessage = "The specified item could not be found in the keychain."
 
 // isNotFound reports whether a `security find-generic-password` failure is a
-// CONFIRMED item-not-found — exit status 44, or stderr matching the exact
-// known not-found message. Anything else (a locked keychain, a denied access
+// CONFIRMED item-not-found — exit status 44, or stderr containing the exact
+// full not-found sentence. Anything else (a locked keychain, a denied access
 // dialog, a timeout, or stderr that merely mentions the phrase in passing)
 // is a read failure, not proof of absence.
 func isNotFound(err error) bool {
@@ -117,5 +123,5 @@ func isNotFound(err error) bool {
 	if exitErr.ExitCode() == notFoundExit {
 		return true
 	}
-	return strings.TrimSpace(string(exitErr.Stderr)) == notFoundStderrMessage
+	return strings.Contains(string(exitErr.Stderr), notFoundStderrMessage)
 }

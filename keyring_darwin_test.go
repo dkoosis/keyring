@@ -94,6 +94,20 @@ func TestGet_StderrNotFoundMessage(t *testing.T) {
 	}
 }
 
+// TestGet_StderrNotFoundWithNoiseIsNotFound pins the Contains-not-equality
+// choice: macOS tools routinely emit dyld/objc warnings on stderr alongside
+// the real message. The full not-found sentence amid noise is still a
+// confirmed absence — an exact match would misread it as ErrUnreadable and
+// break GetOrEnv's env fallback.
+func TestGet_StderrNotFoundWithNoiseIsNotFound(t *testing.T) {
+	bin, _ := stubSecurity(t, "echo 'objc[1234]: Class Foo is implemented in both bar and baz' >&2\necho 'The specified item could not be found in the keychain.' >&2\nexit 1\n")
+	s := newTestStore(t, bin)
+
+	if _, err := s.Get("acct"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("want ErrNotFound despite stderr noise, got %v", err)
+	}
+}
+
 // TestGet_LockedKeychainStderrContainsPhraseIsUnreadable pins kr-jqi: a
 // non-44 failure (exit 51, locked/denied-ish) whose stderr merely CONTAINS
 // the not-found phrase — without being the exact known message — must still
