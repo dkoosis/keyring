@@ -246,8 +246,20 @@ func New(service string, opts ...Option) (*Store, error) {
 	if supported && !filepath.IsAbs(s.securityBin) {
 		return nil, fmt.Errorf("keyring: WithSecurityBin must be an absolute path, got %q", s.securityBin)
 	}
-	if s.keychain != "" && !filepath.IsAbs(s.keychain) {
-		return nil, fmt.Errorf("keyring: WithKeychain must be an absolute path, got %q", s.keychain)
+	if s.keychain != "" {
+		if !filepath.IsAbs(s.keychain) {
+			return nil, fmt.Errorf("keyring: WithKeychain must be an absolute path, got %q", s.keychain)
+		}
+		// The keychain path rides the `security -i` stdin command line on the
+		// write path (see doWrite) through quoteToken, which escapes " and \
+		// but NOT control characters. A newline (or other control byte) would
+		// terminate that line early and let a crafted path inject a second
+		// command, so reject control characters here. Non-ASCII path bytes are
+		// fine — the path is a positional arg, never hex-transcribed on
+		// read-back the way a stored value is.
+		if i := strings.IndexFunc(s.keychain, func(r rune) bool { return r < 0x20 || r == 0x7f }); i >= 0 {
+			return nil, fmt.Errorf("keyring: WithKeychain must not contain control characters")
+		}
 	}
 	return s, nil
 }

@@ -303,8 +303,16 @@ func (s *Store) runDumpKeychain(ctx context.Context, keychain string) (string, e
 	// WaitDelay bounds the wait for the stdout pipe to close AFTER the context
 	// kills the process — see get's identical rationale.
 	cmd.WaitDelay = time.Second
+	// Capture stderr: cmd.Output leaves it discarded here, so a locked-keychain
+	// or permission-denied message would otherwise be lost. Fold it into the
+	// error to make failures diagnosable.
+	var errBuf strings.Builder
+	cmd.Stderr = &errBuf
 	out, err := cmd.Output()
 	if err != nil {
+		if e := strings.TrimSpace(errBuf.String()); e != "" {
+			return "", fmt.Errorf("keyring: dump-keychain: %w: %s", ErrUnreadable, e)
+		}
 		return "", fmt.Errorf("keyring: dump-keychain: %w", ErrUnreadable)
 	}
 	return string(out), nil
@@ -411,8 +419,17 @@ func parseDumpAttrLine(line string) (key, value string, ok bool) {
 		// A hex-encoded blob — dump-keychain's fallback rendering for a value
 		// that isn't cleanly printable. account/service names are ASCII by
 		// this package's own contract, so this is a defensive decode for
-		// items written by another tool, not the expected path.
-		if b, err := hex.DecodeString(raw[2:]); err == nil {
+		// items written by another tool, not the expected path. dump-keychain
+		// often appends the printable rendering after the hex run
+		// (e.g. `0x616E74...  "anthropic"`); keep only the leading hex digits,
+		// or DecodeString fails on the trailing bytes and the item is dropped.
+		h := raw[2:]
+		if j := strings.IndexFunc(h, func(r rune) bool {
+			return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F'))
+		}); j >= 0 {
+			h = h[:j]
+		}
+		if b, err := hex.DecodeString(h); err == nil {
 			return key, string(b), true
 		}
 		return key, "", true

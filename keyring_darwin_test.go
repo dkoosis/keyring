@@ -83,6 +83,22 @@ func TestNew_RejectsRelativeKeychain(t *testing.T) {
 	}
 }
 
+// TestNew_RejectsControlCharsInKeychain pins the injection guard: an absolute
+// keychain path carrying a control character (newline/CR/NUL) must be rejected
+// by New, since the path rides the `security -i` stdin command line and a
+// newline would terminate that line early and inject a second command.
+func TestNew_RejectsControlCharsInKeychain(t *testing.T) {
+	for _, kc := range []string{
+		"/Library/Keychains/login.keychain-db\nadd-generic-password -s evil -a evil -w pwned",
+		"/Library/Keychains/x\rkeychain",
+		"/Library/Keychains/x\x00keychain",
+	} {
+		if _, err := New("svc", WithKeychain(kc)); err == nil {
+			t.Errorf("New with WithKeychain(%q): want error, got nil", kc)
+		}
+	}
+}
+
 // TestNew_KeychainUnsetIsDefaultBehavior pins the empty-default contract:
 // WithKeychain not used at all must behave exactly as before — New succeeds
 // with no keychain pin.
@@ -739,6 +755,32 @@ attributes:
 data:
 "6e756c6c"
 `
+
+// TestParseDumpAttrLine_HexBlobWithTrailingRendering pins the hex-truncation
+// fix: dump-keychain renders a non-printable blob as `0x<hex>` but frequently
+// appends the printable form after it (e.g. `0x616E74...  "anthropic"`).
+// parseDumpAttrLine must decode only the leading hex run — otherwise
+// hex.DecodeString chokes on the trailing bytes and the whole item is dropped
+// from List/DumpDuplicates.
+func TestParseDumpAttrLine_HexBlobWithTrailingRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name, line, wantKey, wantVal string
+	}{
+		{"trailing printable", `"acct"<blob>=0x616E74  "ant"`, "acct", "ant"},
+		{"bare hex", `"acct"<blob>=0x616E74`, "acct", "ant"},
+		{"lowercase hex", `"svce"<blob>=0x666572726574`, "svce", "ferret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, v, ok := parseDumpAttrLine(tc.line)
+			if !ok {
+				t.Fatalf("parseDumpAttrLine(%q): ok=false, want true", tc.line)
+			}
+			if k != tc.wantKey || v != tc.wantVal {
+				t.Errorf("parseDumpAttrLine(%q) = (%q, %q), want (%q, %q)", tc.line, k, v, tc.wantKey, tc.wantVal)
+			}
+		})
+	}
+}
 
 func TestList_ReturnsOnlyItemsForThisService(t *testing.T) {
 	bin, _ := stubSecurity(t, "cat <<'EOF'\n"+dumpKeychainFixture+"EOF\nexit 0\n")
