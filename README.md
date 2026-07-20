@@ -163,10 +163,10 @@ A caller MUST do one of the two:
 
 This library assumes it is the only writer for its service namespace. If
 `ErrVerifyFailed` fires on what looks like a correct write and you have not
-pinned a keychain, check for a duplicate item first
-(`security dump-keychain | grep <service>` across keychains) — the fix is
-pinning a keychain, deleting the duplicate, or picking a distinct service
-name, not retrying the write.
+pinned a keychain, check for a duplicate item first (`keyring doctor
+<service>` flags duplicate groups across the search list) — the fix is
+`keyring migrate <service>` or `--fix` to dedupe, pinning a keychain, or
+picking a distinct service name, not retrying the write.
 
 ## Test kill-switch
 
