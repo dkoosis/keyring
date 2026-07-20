@@ -46,6 +46,42 @@ var (
 // forever; the timeout turns that into a prompt error instead.
 const defaultTimeout = 10 * time.Second
 
+// DisableEnv is the environment kill-switch: when set to any non-empty value,
+// every keychain operation returns ErrUnsupported and Supported() reports
+// false, exactly as on a platform with no backend — so GetOrEnv falls through
+// to the environment. It exists for test harnesses that exec a BUILT consumer
+// binary (blackbox/txtar suites), where WithSecurityBin cannot be injected:
+// setting KEYRING_DISABLE=1 in the subprocess env guarantees the developer's
+// real keychain can never leak into an env-isolated test. It is read at call
+// time, not init, so in-process tests can toggle it with t.Setenv.
+const DisableEnv = "KEYRING_DISABLE"
+
+// disabled reports whether the DisableEnv kill-switch is set.
+func disabled() bool { return os.Getenv(DisableEnv) != "" }
+
+// noControlChars rejects strings containing control characters (anything
+// below 0x20, or DEL). Two reasons: a newline/CR would terminate or corrupt
+// the `security -i` command line the darwin write path feeds the CLI, and
+// `security find-generic-password -w` hex-mangles values with non-printable
+// bytes on read, so such a value could never round-trip anyway. Store
+// multi-line material (PEM keys) encoded — e.g. base64 — as canapay does for
+// its SFTP seed.
+func noControlChars(what, s string) error {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("keyring: %s must not contain control characters (got %q); encode multi-line material (e.g. base64) before storing", what, r)
+		}
+	}
+	return nil
+}
+
+// errDisabled is the ErrUnsupported-wrapping error every operation returns
+// while the kill-switch is set; it names the env var so an unexpectedly inert
+// keychain is diagnosable from the error text alone.
+func errDisabled() error {
+	return fmt.Errorf("keyring: disabled by %s: %w", DisableEnv, ErrUnsupported)
+}
+
 // Store reads and writes secrets under one keychain service name.
 type Store struct {
 	service     string
@@ -79,6 +115,9 @@ func New(service string, opts ...Option) (*Store, error) {
 	if strings.TrimSpace(service) == "" {
 		return nil, errors.New("keyring: service name must not be empty")
 	}
+	if err := noControlChars("service name", service); err != nil {
+		return nil, err
+	}
 	s := &Store{
 		service:     service,
 		timeout:     defaultTimeout,
@@ -94,10 +133,13 @@ func New(service string, opts ...Option) (*Store, error) {
 // binary — false on non-darwin builds, where every Store operation returns
 // ErrUnsupported. Lets a doctor/status surface tell "backend absent" apart
 // from "secret absent".
-func Supported() bool { return supported }
+func Supported() bool { return supported && !disabled() }
 
 // Get reads the secret stored under account.
 func (s *Store) Get(account string) (string, error) {
+	if disabled() {
+		return "", errDisabled()
+	}
 	return s.get(account)
 }
 
@@ -107,6 +149,15 @@ func (s *Store) Get(account string) (string, error) {
 // moves on. The value is piped to `security` on stdin, never placed on its
 // argv, so it cannot appear in a process-table snapshot.
 func (s *Store) Set(account, value string) error {
+	if disabled() {
+		return errDisabled()
+	}
+	if err := noControlChars("account", account); err != nil {
+		return err
+	}
+	if err := noControlChars("value", value); err != nil {
+		return err
+	}
 	if err := s.write(account, value); err != nil {
 		return err
 	}
@@ -128,7 +179,7 @@ func (s *Store) Set(account, value string) error {
 //     the caller must NOT treat this as absent, or a later overwrite could
 //     clobber a value that is actually there.
 func (s *Store) Has(account string) (bool, error) {
-	_, err := s.get(account)
+	_, err := s.Get(account)
 	switch {
 	case err == nil:
 		return true, nil
@@ -147,7 +198,7 @@ func (s *Store) Has(account string) (bool, error) {
 // keychain error is returned so the caller always learns why the keychain
 // missed.
 func (s *Store) GetOrEnv(account, envVar string) (string, error) {
-	v, err := s.get(account)
+	v, err := s.Get(account)
 	if err == nil {
 		return v, nil
 	}

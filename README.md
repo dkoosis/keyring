@@ -56,6 +56,39 @@ Store a secret from a terminal (value prompted, off argv):
 security add-generic-password -U -s myapp -a anthropic -w
 ```
 
+## Test kill-switch
+
+`KEYRING_DISABLE=1` (any non-empty value) makes every operation return
+`ErrUnsupported` and `Supported()` report false — the Store behaves exactly
+like a build with no backend, and `GetOrEnv` falls through to the
+environment. It exists for test harnesses that exec a **built** consumer
+binary (blackbox/txtar suites), where `WithSecurityBin` cannot be injected:
+set it in the subprocess env and the developer's real keychain can never
+leak into an env-isolated test. Read at call time, so in-process tests can
+toggle it with `t.Setenv(keyring.DisableEnv, "1")`.
+
+## Consuming this module (it is private)
+
+`github.com/dkoosis/keyring` is a private repo. Builds that fetch it need:
+
+```sh
+export GOPRIVATE='github.com/dkoosis/*'
+# plus a github.com git credential (gh auth login covers local dev)
+```
+
+CI (GitHub Actions) — the default `GITHUB_TOKEN` cannot read another
+private repo. Add a fine-grained PAT (read-only Contents on this repo) as a
+repo secret, e.g. `DKOOSIS_MODULES_TOKEN`, then before any Go step:
+
+```yaml
+- run: git config --global url."https://x-access-token:${{ secrets.DKOOSIS_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
+  env: {}
+- run: echo 'GOPRIVATE=github.com/dkoosis/*' >> "$GITHUB_ENV"
+```
+
+Docker builds need the same via a build secret — never bake the token into
+a layer.
+
 ## Testing
 
 `go test ./...` runs stub-based contract tests (argv shape, stdin protocol,
