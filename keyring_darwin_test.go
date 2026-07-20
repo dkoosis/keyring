@@ -486,6 +486,134 @@ exit 0
 	}
 }
 
+// TestSetIfAbsent_AbsentStoresAndVerifies pins the happy path: no -U on the
+// wire, and a normal store + read-back verify identical to Set's, when the
+// item wasn't already there.
+func TestSetIfAbsent_AbsentStoresAndVerifies(t *testing.T) {
+	bin, dir := stubSecurity(t, `case "$1" in
+find-generic-password) printf 's3cret\n' ;;
+esac
+exit 0
+`)
+	s := newTestStore(t, bin)
+
+	if err := s.SetIfAbsent("acct", "s3cret"); err != nil {
+		t.Fatalf("SetIfAbsent: %v", err)
+	}
+	if argv := readCapture(t, dir, "argv"); strings.Contains(argv, "s3cret") {
+		t.Fatalf("SECRET ON ARGV: %q", argv)
+	}
+	// Exercise writeIfAbsent alone against a fresh stub for the exact stdin
+	// shape: add-generic-password WITHOUT -U.
+	binW, dirW := stubSecurity(t, "exit 0\n")
+	sw := newTestStore(t, binW)
+	if err := sw.writeIfAbsent("acct", "s3cret"); err != nil {
+		t.Fatalf("writeIfAbsent: %v", err)
+	}
+	wantStdin := `add-generic-password -s "keyring-test" -a "acct" -w "s3cret"` + "\n"
+	if stdin := readCapture(t, dirW, "stdin"); stdin != wantStdin {
+		t.Errorf("stdin = %q, want %q", stdin, wantStdin)
+	}
+}
+
+// TestSetIfAbsent_ExistingItemIsErrExistsNoClobber pins the write-once
+// contract: a duplicate-item failure from `security` (exit 45, the
+// errSecDuplicateItem the CLI surfaces for an unconditional add against an
+// existing item) must map to ErrExists — and SetIfAbsent must not fall
+// through to any overwrite path or read-back-as-success on that failure.
+func TestSetIfAbsent_ExistingItemIsErrExistsNoClobber(t *testing.T) {
+	bin, _ := stubSecurity(t, `case "$1" in
+-i) exit 45 ;;
+esac
+exit 0
+`)
+	s := newTestStore(t, bin)
+
+	err := s.SetIfAbsent("acct", "new-value")
+	if !errors.Is(err, ErrExists) {
+		t.Fatalf("SetIfAbsent: want ErrExists, got %v", err)
+	}
+}
+
+// TestSetIfAbsent_ExistingItemStderrMessageIsErrExists pins the stderr-text
+// fallback path (mirroring isNotFound's dual exit-code/stderr contract): some
+// builds may report the duplicate item via stderr text rather than exit 45.
+func TestSetIfAbsent_ExistingItemStderrMessageIsErrExists(t *testing.T) {
+	bin, _ := stubSecurity(t, `case "$1" in
+-i)
+  echo 'security: SecKeychainItemCreateFromContent: The specified item already exists in the keychain.' >&2
+  exit 1
+  ;;
+esac
+exit 0
+`)
+	s := newTestStore(t, bin)
+
+	err := s.SetIfAbsent("acct", "new-value")
+	if !errors.Is(err, ErrExists) {
+		t.Fatalf("SetIfAbsent: want ErrExists from stderr match, got %v", err)
+	}
+}
+
+// TestSetIfAbsent_OtherWriteFailureIsNotErrExists pins the inverse of the
+// two tests above: a generic write failure (locked keychain, denied access)
+// must never be misclassified as ErrExists — that would tell a caller "this
+// account is already initialized" when the truth is "the write attempt
+// itself failed".
+func TestSetIfAbsent_OtherWriteFailureIsNotErrExists(t *testing.T) {
+	bin, _ := stubSecurity(t, `case "$1" in
+-i) exit 51 ;;
+esac
+exit 0
+`)
+	s := newTestStore(t, bin)
+
+	err := s.SetIfAbsent("acct", "v")
+	if err == nil {
+		t.Fatal("SetIfAbsent: want error on write failure, got nil")
+	}
+	if errors.Is(err, ErrExists) {
+		t.Errorf("SetIfAbsent: exit 51 must not classify as ErrExists, got %v", err)
+	}
+}
+
+// TestSetIfAbsent_RejectsControlCharsAndNonASCII mirrors Set's validation
+// contract (TestSet_RejectsControlChars, TestSet_RejectsNonASCII):
+// SetIfAbsent must refuse bad input before any `security` invocation.
+func TestSetIfAbsent_RejectsControlCharsAndNonASCII(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, bad := range []string{"line1\nline2", "café", "emoji🔑token"} {
+		if err := s.SetIfAbsent("acct", bad); err == nil {
+			t.Errorf("SetIfAbsent(%q): no error; must be rejected", bad)
+		}
+	}
+	if err := s.SetIfAbsent("", "v"); err == nil {
+		t.Error("SetIfAbsent with empty account: no error; must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "argv")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("security was invoked for rejected input (argv capture exists, stat err=%v)", err)
+	}
+}
+
+// TestSetIfAbsent_KeychainArgReachesAddGenericPassword pins kr-f2v honoring
+// WithKeychain: the pinned keychain must ride the writeIfAbsent stdin command
+// line the same way it rides write's.
+func TestSetIfAbsent_KeychainArgReachesAddGenericPassword(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	s.keychain = "/Users/x/Library/Keychains/login.keychain-db"
+
+	if err := s.writeIfAbsent("acct", "s3cret"); err != nil {
+		t.Fatalf("writeIfAbsent: %v", err)
+	}
+	wantStdin := `add-generic-password -s "keyring-test" -a "acct" -w "s3cret" ` +
+		quoteToken(s.keychain) + "\n"
+	if stdin := readCapture(t, dir, "stdin"); stdin != wantStdin {
+		t.Errorf("stdin = %q, want %q", stdin, wantStdin)
+	}
+}
+
 func TestHas_TriState(t *testing.T) {
 	t.Run("present", func(t *testing.T) {
 		bin, _ := stubSecurity(t, "printf 'x\\n'\nexit 0\n")
