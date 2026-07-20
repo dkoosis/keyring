@@ -646,7 +646,11 @@ func TestGetOrEnv_FallbackRules(t *testing.T) {
 // "other/x" item that List/DumpDuplicates must filter out by service. Shaped
 // after real `security dump-keychain` output — quoted 4-char attribute keys,
 // a numeric-alias line ignored by the parser, and a "data:" section the
-// parser must never read past.
+// parser must never read past. Also carries two records the parser must
+// skip entirely: an "inet" (internet password) item — this package only
+// ever creates or reads "genp" — and a genp record whose acct is <NULL>,
+// which cannot become an Item because an Item without an account is
+// unaddressable by every other call in the package.
 const dumpKeychainFixture = `keychain: "/Users/x/Library/Keychains/login.keychain-db"
 version: 512
 class: "genp"
@@ -682,6 +686,22 @@ attributes:
     "svce"<blob>="other"
 data:
 "78797a"
+keychain: "/Users/x/Library/Keychains/login.keychain-db"
+version: 512
+class: "inet"
+attributes:
+    "acct"<blob>="anthropic"
+    "svce"<blob>="ferret"
+data:
+"696e6574"
+keychain: "/Users/x/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<NULL>
+    "svce"<blob>="ferret"
+data:
+"6e756c6c"
 `
 
 func TestList_ReturnsOnlyItemsForThisService(t *testing.T) {
