@@ -237,6 +237,31 @@ func TestSet_RejectsControlChars(t *testing.T) {
 	}
 }
 
+// TestSet_RejectsNonASCII pins kr-yqk: `security find-generic-password -w`
+// hex-transcribes any stored value containing bytes >=0x80 on read-back (a
+// live repro stored 'café' and got the literal string '636166c3a9' with
+// err==nil). Since that corruption is undetectable at Get time (no marker
+// distinguishes a hex transcription from a real hex-looking secret), the only
+// sound contract is to refuse to store non-ASCII in the first place — for
+// both the value and the account (which also rides the `security -i` command
+// line).
+func TestSet_RejectsNonASCII(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, bad := range []string{"café", "emoji🔑token", "élite"} {
+		if err := s.Set("acct", bad); err == nil {
+			t.Errorf("Set(%q): no error; non-ASCII values must be rejected", bad)
+		}
+	}
+	if err := s.Set("café-acct", "v"); err == nil {
+		t.Error("Set with non-ASCII account: no error; must be rejected")
+	}
+	// No security invocation may have happened for rejected inputs.
+	if _, err := os.Stat(filepath.Join(dir, "argv")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("security was invoked for rejected input (argv capture exists, stat err=%v)", err)
+	}
+}
+
 func TestSet_ReadBackMismatchIsVerifyFailed(t *testing.T) {
 	bin, _ := stubSecurity(t, `case "$1" in
 find-generic-password) printf 'WRONG\n' ;;
