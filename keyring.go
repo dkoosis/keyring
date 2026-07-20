@@ -152,6 +152,9 @@ func New(service string, opts ...Option) (*Store, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.timeout <= 0 {
+		return nil, fmt.Errorf("keyring: WithTimeout must be positive, got %s", s.timeout)
+	}
 	return s, nil
 }
 

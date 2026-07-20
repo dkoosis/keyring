@@ -55,6 +55,14 @@ func TestNew_RejectsEmptyService(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsNonPositiveTimeout(t *testing.T) {
+	for _, d := range []time.Duration{0, -1 * time.Second} {
+		if _, err := New("svc", WithTimeout(d)); err == nil {
+			t.Errorf("New with WithTimeout(%s): want error, got nil", d)
+		}
+	}
+}
+
 func TestGet_ArgvContract(t *testing.T) {
 	bin, dir := stubSecurity(t, "printf 'the-secret\\n'\nexit 0\n")
 	s := newTestStore(t, bin)
