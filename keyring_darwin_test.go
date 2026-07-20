@@ -94,6 +94,38 @@ func TestGet_StderrNotFoundMessage(t *testing.T) {
 	}
 }
 
+// TestGet_StderrNotFoundWithNoiseIsNotFound pins the Contains-not-equality
+// choice: macOS tools routinely emit dyld/objc warnings on stderr alongside
+// the real message. The full not-found sentence amid noise is still a
+// confirmed absence — an exact match would misread it as ErrUnreadable and
+// break GetOrEnv's env fallback.
+func TestGet_StderrNotFoundWithNoiseIsNotFound(t *testing.T) {
+	bin, _ := stubSecurity(t, "echo 'objc[1234]: Class Foo is implemented in both bar and baz' >&2\necho 'The specified item could not be found in the keychain.' >&2\nexit 1\n")
+	s := newTestStore(t, bin)
+
+	if _, err := s.Get("acct"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("want ErrNotFound despite stderr noise, got %v", err)
+	}
+}
+
+// TestGet_LockedKeychainStderrContainsPhraseIsUnreadable pins kr-jqi: a
+// non-44 failure (exit 51, locked/denied-ish) whose stderr merely CONTAINS
+// the not-found phrase — without being the exact known message — must still
+// classify as ErrUnreadable. Otherwise Has would report safe-to-overwrite
+// over a keychain slot that actually holds a live secret.
+func TestGet_LockedKeychainStderrContainsPhraseIsUnreadable(t *testing.T) {
+	bin, _ := stubSecurity(t, "echo 'SecKeychainFindGenericPassword: the item could not be found because the keychain is locked' >&2\nexit 51\n")
+	s := newTestStore(t, bin)
+
+	_, err := s.Get("acct")
+	if !errors.Is(err, ErrUnreadable) {
+		t.Errorf("want ErrUnreadable, got %v", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("a non-exact stderr match on a non-44 exit must NEVER classify as ErrNotFound")
+	}
+}
+
 func TestGet_OtherFailureIsUnreadableNotAbsent(t *testing.T) {
 	for name, script := range map[string]string{
 		"exit1":  "exit 1\n",  // generic failure
