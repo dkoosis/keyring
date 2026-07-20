@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -130,9 +131,11 @@ func WithTimeout(d time.Duration) Option {
 
 // WithSecurityBin overrides the path to the `security` binary. FOR TESTS
 // ONLY — it exists so consumers can point a Store at a stub and assert the
-// CLI contract. Production code must keep the default absolute path; a
-// relative or $PATH-resolved override reopens the PATH-hijack hole the
-// default exists to close.
+// CLI contract. Production code must keep the default absolute path.
+// New rejects a non-absolute path outright: a relative or $PATH-resolved
+// override reopens the PATH-hijack hole the default exists to close, and
+// whatever binary ends up at that path receives the secret on stdin during
+// Set.
 func WithSecurityBin(path string) Option {
 	return func(s *Store) { s.securityBin = path }
 }
@@ -159,6 +162,9 @@ func New(service string, opts ...Option) (*Store, error) {
 	}
 	if s.timeout <= 0 {
 		return nil, fmt.Errorf("keyring: WithTimeout must be positive, got %s", s.timeout)
+	}
+	if !filepath.IsAbs(s.securityBin) {
+		return nil, fmt.Errorf("keyring: WithSecurityBin must be an absolute path, got %q", s.securityBin)
 	}
 	return s, nil
 }
