@@ -293,6 +293,48 @@ exit 0
 	}
 }
 
+// TestSet_ValuePersistsPastFailedVerify pins the ErrVerifyFailed-is-
+// indeterminate contract (kr-4cd): the write (`security -i`) and the
+// read-back (`find-generic-password`) are two separate executions with
+// nothing spanning the gap, so a read-back failure right after a successful
+// write does not mean the value was never stored. The stub makes
+// add-generic-password succeed unconditionally, then fails the FIRST
+// find-generic-password call (simulating a lock/deny landing between write
+// and verify) while a SECOND, later call succeeds and returns the written
+// value — proving the write persisted past the failed verify, exactly what
+// Set must not treat as "not stored".
+func TestSet_ValuePersistsPastFailedVerify(t *testing.T) {
+	bin, _ := stubSecurity(t, `case "$1" in
+find-generic-password)
+  cf="$(dirname "$0")/find-count"
+  n=0
+  [ -f "$cf" ] && n=$(cat "$cf")
+  n=$((n+1))
+  echo "$n" > "$cf"
+  if [ "$n" -eq 1 ]; then exit 1; fi
+  printf 'right\n'
+  ;;
+esac
+exit 0
+`)
+	s := newTestStore(t, bin)
+
+	err := s.Set("acct", "right")
+	if !errors.Is(err, ErrVerifyFailed) {
+		t.Fatalf("Set: want ErrVerifyFailed on the first (failing) read-back, got %v", err)
+	}
+
+	// A later, independent Get succeeds and returns the value the write
+	// stored — the ErrVerifyFailed above was indeterminate, not "unwritten".
+	got, err := s.Get("acct")
+	if err != nil {
+		t.Fatalf("Get after failed verify: %v", err)
+	}
+	if got != "right" {
+		t.Errorf("Get after failed verify = %q, want %q (value must persist past a failed verify)", got, "right")
+	}
+}
+
 func TestHas_TriState(t *testing.T) {
 	t.Run("present", func(t *testing.T) {
 		bin, _ := stubSecurity(t, "printf 'x\\n'\nexit 0\n")

@@ -41,6 +41,21 @@ var (
 	// ErrVerifyFailed means the post-Set read-back failed or did not match
 	// the stored value. The returned error chains the underlying cause where
 	// one exists.
+	//
+	// INDETERMINATE, not "not written": write and read-back are two separate
+	// `security` invocations with no lock or transaction spanning the gap, so
+	// this error can fire while the value is durably stored — a concurrent
+	// Set to the same account landing in the gap (read-back sees the other
+	// writer's value; the keychain state is still consistent, last write
+	// wins), or the keychain locking/denying access after the write lands but
+	// before the read-back runs. A caller MUST NOT treat ErrVerifyFailed as
+	// proof the value is absent, and must not route the secret to a fallback
+	// store on this error — doing so risks two sources of truth for the same
+	// account. Set deliberately does not auto-rollback (delete the item) on
+	// this error either: a transient read failure is indistinguishable from
+	// the cases above, and rolling back could destroy a good pre-existing
+	// value that Set never touched. Retry Get (or Has) to resolve the
+	// uncertainty instead.
 	ErrVerifyFailed = errors.New("read-back verification failed")
 	// ErrUnsupported means no keychain backend is compiled into this binary
 	// (any non-darwin build).
@@ -166,6 +181,12 @@ func (s *Store) Get(account string) (string, error) {
 // read-back turns that silent corruption into a hard error before the caller
 // moves on. The value is piped to `security` on stdin, never placed on its
 // argv, so it cannot appear in a process-table snapshot.
+//
+// The write and the read-back are two separate `security` executions with no
+// lock or transaction spanning the gap between them: an ErrVerifyFailed
+// return is therefore INDETERMINATE, not confirmation the value was never
+// stored — see ErrVerifyFailed. Callers must treat it as "unknown, go check"
+// (Get/Has), never as "not written".
 func (s *Store) Set(account, value string) error {
 	if disabled() {
 		return errDisabled()
