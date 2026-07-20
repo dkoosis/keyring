@@ -56,6 +56,28 @@ Store a secret from a terminal (value prompted, off argv):
 security add-generic-password -U -s myapp -a anthropic -w
 ```
 
+## Single-item assumption
+
+`Set` writes with `add-generic-password -U -s <service> -a <account>` and
+verifies with `find-generic-password -s <service> -a <account>`. `-U`
+updates the item matching that attribute set; `find` returns the first
+service+account match in keychain search order. Both target the *same*
+item only if exactly one exists.
+
+If a duplicate (service, account) item exists — planted by another tool
+with extra attributes, or living in a different keychain (system vs.
+login) — write and read-back can address different items: a correct
+write followed by a read of the other item produces a spurious
+`ErrVerifyFailed`, or (if the values happen to match) a masked no-op.
+
+This library assumes it is the only writer for its service namespace and
+that one item exists per (service, account) in the default keychain
+search path. A duplicate is out of contract. If `ErrVerifyFailed` fires
+on what looks like a correct write, check for a duplicate item first
+(`security dump-keychain | grep <service>` across keychains) — the fix
+is deleting the duplicate or picking a distinct service name, not
+retrying the write.
+
 ## Test kill-switch
 
 `KEYRING_DISABLE=1` (any non-empty value) makes every operation return
