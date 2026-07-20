@@ -9,6 +9,17 @@
 // advisory, not a compare-and-swap; this package assumes one writer per
 // account. See Has.
 //
+// PRECONDITION: exactly one (service, account) item across the keychain
+// search list, or a pinned keychain. `find-generic-password` returns the
+// FIRST match in keychain search order and `add-generic-password -U`
+// updates "the" matching item — whichever one that search order picks. A
+// duplicate item planted by another tool in a higher-priority keychain
+// means Get can return that other item's value (stale or
+// attacker-controlled) and Set's read-back can verify against it too,
+// masking a write to the wrong item. Callers that cannot guarantee
+// uniqueness across the search list MUST pin a keychain with WithKeychain.
+// See WithKeychain and the README's "Single-item assumption" section.
+//
 // Service names, account names, and values must be printable ASCII
 // (0x20-0x7e): `security find-generic-password -w` hex-transcribes any
 // stored value containing a byte >=0x80 on read, indistinguishable from a
@@ -119,6 +130,7 @@ type Store struct {
 	service     string
 	timeout     time.Duration
 	securityBin string // absolute path; reassigned only by tests
+	keychain    string // absolute path to a pinned keychain file; empty = default search list
 }
 
 // Option configures a Store.
@@ -138,6 +150,30 @@ func WithTimeout(d time.Duration) Option {
 // Set.
 func WithSecurityBin(path string) Option {
 	return func(s *Store) { s.securityBin = path }
+}
+
+// WithKeychain pins every find-generic-password and add-generic-password
+// call to one keychain file, instead of `security`'s default search list.
+//
+// Precondition this closes: find-generic-password returns the FIRST
+// service+account match in keychain search order, and add-generic-password
+// -U updates "the" matching item — whichever one that search order picks.
+// A duplicate (service, account) item planted by another tool in a
+// higher-priority keychain (e.g. system ahead of login) means Get can
+// return that OTHER item's value — attacker-controlled or merely stale —
+// and Set's read-back can verify against it too, masking a write that
+// landed on the wrong item entirely. See "Single-item assumption" in the
+// package doc and README.
+//
+// WithKeychain removes the ambiguity by scoping both the read and the write
+// to one named keychain file: `security ... -s <service> -a <account> -w
+// <path>`. Set it whenever more than one keychain on the search list could
+// plausibly hold an item under this service+account — e.g. a shared machine,
+// or a service name that isn't guaranteed unique. New rejects a
+// non-absolute path outright, mirroring WithSecurityBin: a relative path is
+// ambiguous about which keychain it resolves to.
+func WithKeychain(path string) Option {
+	return func(s *Store) { s.keychain = path }
 }
 
 // New returns a Store scoped to the given keychain service name. The service
@@ -165,6 +201,9 @@ func New(service string, opts ...Option) (*Store, error) {
 	}
 	if !filepath.IsAbs(s.securityBin) {
 		return nil, fmt.Errorf("keyring: WithSecurityBin must be an absolute path, got %q", s.securityBin)
+	}
+	if s.keychain != "" && !filepath.IsAbs(s.keychain) {
+		return nil, fmt.Errorf("keyring: WithKeychain must be an absolute path, got %q", s.keychain)
 	}
 	return s, nil
 }

@@ -71,6 +71,30 @@ func TestNew_RejectsRelativeSecurityBin(t *testing.T) {
 	}
 }
 
+// TestNew_RejectsRelativeKeychain pins kr-1up: WithKeychain must reject a
+// non-absolute path, the same shape as WithSecurityBin — a relative path is
+// ambiguous about which keychain it resolves to.
+func TestNew_RejectsRelativeKeychain(t *testing.T) {
+	for _, kc := range []string{"login.keychain-db", "./login.keychain-db", "../x.keychain-db"} {
+		if _, err := New("svc", WithKeychain(kc)); err == nil {
+			t.Errorf("New with WithKeychain(%q): want error, got nil", kc)
+		}
+	}
+}
+
+// TestNew_KeychainUnsetIsDefaultBehavior pins the empty-default contract:
+// WithKeychain not used at all must behave exactly as before — New succeeds
+// with no keychain pin.
+func TestNew_KeychainUnsetIsDefaultBehavior(t *testing.T) {
+	s, err := New("svc")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if s.keychain != "" {
+		t.Errorf("keychain = %q, want empty by default", s.keychain)
+	}
+}
+
 func TestGet_ArgvContract(t *testing.T) {
 	bin, dir := stubSecurity(t, "printf 'the-secret\\n'\nexit 0\n")
 	s := newTestStore(t, bin)
@@ -83,6 +107,23 @@ func TestGet_ArgvContract(t *testing.T) {
 		t.Errorf("Get = %q, want %q", got, "the-secret")
 	}
 	wantArgv := "find-generic-password\n-s\nkeyring-test\n-a\nacct\n-w\n"
+	if argv := readCapture(t, dir, "argv"); argv != wantArgv {
+		t.Errorf("argv = %q, want %q", argv, wantArgv)
+	}
+}
+
+// TestGet_KeychainArgReachesFindGenericPassword pins kr-1up: when
+// WithKeychain is set, the pinned keychain path must be appended as the
+// trailing argument to find-generic-password, and be absent when unset.
+func TestGet_KeychainArgReachesFindGenericPassword(t *testing.T) {
+	bin, dir := stubSecurity(t, "printf 'the-secret\\n'\nexit 0\n")
+	s := newTestStore(t, bin)
+	s.keychain = "/Users/x/Library/Keychains/login.keychain-db"
+
+	if _, err := s.Get("acct"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	wantArgv := "find-generic-password\n-s\nkeyring-test\n-a\nacct\n-w\n" + s.keychain + "\n"
 	if argv := readCapture(t, dir, "argv"); argv != wantArgv {
 		t.Errorf("argv = %q, want %q", argv, wantArgv)
 	}
@@ -213,6 +254,44 @@ exit 0
 	// Argv carries only the interactive-mode flag.
 	if argv := readCapture(t, dirW, "argv"); argv != "-i\n" {
 		t.Errorf("write argv = %q, want %q", argv, "-i\n")
+	}
+}
+
+// TestWrite_KeychainArgReachesAddGenericPassword pins kr-1up on the write
+// path: the pinned keychain path must ride the `security -i` stdin command
+// line as the trailing token, through the SAME quoteToken tokenizer as every
+// other token — never on argv, and never unescaped.
+func TestWrite_KeychainArgReachesAddGenericPassword(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	s.keychain = `/Users/x/weird "path".keychain-db`
+
+	if err := s.write("acct", "s3cret"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	wantStdin := `add-generic-password -U -s "keyring-test" -a "acct" -w "s3cret" ` +
+		quoteToken(s.keychain) + "\n"
+	if stdin := readCapture(t, dir, "stdin"); stdin != wantStdin {
+		t.Errorf("stdin = %q, want %q", stdin, wantStdin)
+	}
+	if argv := readCapture(t, dir, "argv"); strings.Contains(argv, "weird") {
+		t.Errorf("keychain path leaked onto argv: %q", argv)
+	}
+}
+
+// TestWrite_KeychainUnsetOmitsTrailingArg pins the empty-default contract on
+// the write path: no WithKeychain means the stdin command line is unchanged
+// from before this option existed.
+func TestWrite_KeychainUnsetOmitsTrailingArg(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+
+	if err := s.write("acct", "s3cret"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	wantStdin := `add-generic-password -U -s "keyring-test" -a "acct" -w "s3cret"` + "\n"
+	if stdin := readCapture(t, dir, "stdin"); stdin != wantStdin {
+		t.Errorf("stdin = %q, want %q", stdin, wantStdin)
 	}
 }
 

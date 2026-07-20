@@ -31,7 +31,13 @@ const notFoundExit = 44
 func (s *Store) get(account string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.securityBin, "find-generic-password", "-s", s.service, "-a", account, "-w")
+	args := []string{"find-generic-password", "-s", s.service, "-a", account, "-w"}
+	// A pinned keychain goes last, as `security` expects for the trailing
+	// keychain-file positional argument — see WithKeychain.
+	if s.keychain != "" {
+		args = append(args, s.keychain)
+	}
+	cmd := exec.CommandContext(ctx, s.securityBin, args...)
 	// WaitDelay bounds the wait for the stdout pipe to close AFTER the context
 	// kills the process: a grandchild inheriting the pipe (or a wedged kernel
 	// call) would otherwise hold Output() open past the deadline.
@@ -68,10 +74,17 @@ func (s *Store) write(account, value string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.securityBin, "-i")
 	cmd.WaitDelay = time.Second // see get: bound the post-kill pipe wait
-	cmd.Stdin = strings.NewReader("add-generic-password -U" +
+	line := "add-generic-password -U" +
 		" -s " + quoteToken(s.service) +
 		" -a " + quoteToken(account) +
-		" -w " + quoteToken(value) + "\n")
+		" -w " + quoteToken(value)
+	// A pinned keychain goes last, same trailing-positional shape as get, and
+	// through the same quoteToken tokenizer as every other token on this
+	// command line — see WithKeychain.
+	if s.keychain != "" {
+		line += " " + quoteToken(s.keychain)
+	}
+	cmd.Stdin = strings.NewReader(line + "\n")
 	// Capture stderr: cmd.Run leaves it nil, so a locked-keychain or
 	// permission-denied message from `security` would otherwise be discarded.
 	// Folding it into the error makes write failures diagnosable.
