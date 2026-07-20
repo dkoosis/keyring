@@ -177,7 +177,11 @@ func New(service string, opts ...Option) (*Store, error) {
 	if s.timeout <= 0 {
 		return nil, fmt.Errorf("keyring: WithTimeout must be positive, got %s", s.timeout)
 	}
-	if !filepath.IsAbs(s.securityBin) {
+	// Only meaningful where a backend exists: non-darwin builds have no
+	// security binary at all (defaultSecurityBin is ""), and New must still
+	// succeed there so cross-platform callers can construct a Store and let
+	// GetOrEnv fall through to the environment.
+	if supported && !filepath.IsAbs(s.securityBin) {
 		return nil, fmt.Errorf("keyring: WithSecurityBin must be an absolute path, got %q", s.securityBin)
 	}
 	return s, nil
