@@ -1,8 +1,13 @@
 // Package keyring stores and retrieves secrets in the macOS keychain via the
 // `security` CLI — no cgo, no third-party dependency. Secrets never appear on
 // a process argv, writes are verified by read-back, and "not found" is kept
-// strictly distinct from "could not read" so callers can use presence checks
-// as overwrite guards.
+// strictly distinct from "could not read" so callers get an honest answer to
+// "does this exist right now" — but that answer is a point-in-time read, not
+// an atomic guard: `security add-generic-password -U` unconditionally
+// overwrites on Set, so a concurrent writer between a caller's presence
+// check and its Set is clobbered with no error to either side. Has is
+// advisory, not a compare-and-swap; this package assumes one writer per
+// account. See Has.
 //
 // Service names, account names, and values must be printable ASCII
 // (0x20-0x7e): `security find-generic-password -w` hex-transcribes any
@@ -223,11 +228,22 @@ func (s *Store) Set(account, value string) error {
 
 // Has reports whether a value is stored under account, returning an error the
 // caller MUST block on. The three outcomes are distinct:
-//   - (true, nil)  — the value is present.
-//   - (false, nil) — CONFIRMED not-found; safe to write.
+//   - (true, nil)  — the value was present at the moment of this read.
+//   - (false, nil) — CONFIRMED not-found at the moment of this read.
 //   - (false, err) — the slot could not be read (locked, denied, timed out);
 //     the caller must NOT treat this as absent, or a later overwrite could
 //     clobber a value that is actually there.
+//
+// Has is ADVISORY-ONLY, not an atomic overwrite guard: the result is stale
+// the instant it returns. Set writes with `security add-generic-password
+// -U` (update-if-exists), so a concurrent writer that stores a value in the
+// window between this call and a following Set is silently overwritten —
+// no error to either caller. The `security` CLI has no compare-and-swap;
+// this package cannot offer one. Treat (false, nil) as "no value seen just
+// now", and rely on it only when the account has a single writer. A future
+// SetIfAbsent (skip -U, map errSecDuplicateItem/exit 45 to a sentinel) could
+// close this gap for a single process, but that guard would still need to
+// live with the caller, not here.
 func (s *Store) Has(account string) (bool, error) {
 	_, err := s.Get(account)
 	switch {
