@@ -270,6 +270,42 @@ func TestSet_RejectsNonASCII(t *testing.T) {
 	}
 }
 
+// TestSet_ValueErrorDoesNotLeakBytes pins kr-2vk: printableASCIIOnly's error
+// echoes the offending rune via %q, which is fine for service/account (not
+// secret) but leaks a byte of the secret when the failing field is the
+// value. The value-field error must be generic, with no byte of the
+// rejected value present anywhere in the error text.
+func TestSet_ValueErrorDoesNotLeakBytes(t *testing.T) {
+	bin, _ := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"non-ASCII", "café-secret-xyz"},
+		{"control char", "line1\nsecret-line2"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := s.Set("acct", c.bad)
+			if err == nil {
+				t.Fatalf("Set(%q): no error; must be rejected", c.bad)
+			}
+			msg := err.Error()
+			for _, r := range c.bad {
+				if r < 0x20 || r > 0x7e {
+					if strings.ContainsRune(msg, r) {
+						t.Errorf("Set(%q): error %q contains offending rune %q from the value", c.bad, msg, r)
+					}
+				}
+			}
+			if strings.Contains(msg, c.bad) {
+				t.Errorf("Set(%q): error %q contains the full offending value", c.bad, msg)
+			}
+		})
+	}
+}
+
 // TestSet_RejectsEmptyAccount pins kr-rjx: New rejects an empty/whitespace
 // service name to stop two sloppy callers from colliding in an unnamed
 // namespace, but Set left the symmetric account-side hole open — every
