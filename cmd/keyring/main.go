@@ -108,12 +108,15 @@ usage:
   keyring get <service> <account>   read a secret (masked on a terminal; --raw reveals)
   keyring ls  <service>             list items under a service (never prints values)
   keyring rm  <service> <account>   delete an item (confirms; --yes to skip)
+  keyring doctor <service>          diagnose items; --fix heals what it safely can
 
 global flags: --json  --keychain <abs-path>  --timeout <duration>
-set flags:    --stdin  --force        get flags: --raw        rm flags: --yes
+set flags:    --stdin  --force     get flags: --raw
+rm flags:     --yes                doctor flags: --fix --yes
 
 exit codes: 0 ok · 2 validation · 3 not found · 4 unreadable/locked ·
-            5 verify failed · 6 already exists · 7 unsupported/disabled
+            5 verify failed · 6 already exists · 7 unsupported/disabled ·
+            8 doctor found problems
 `
 
 func (a *app) run(args []string) int {
@@ -131,6 +134,8 @@ func (a *app) run(args []string) int {
 		return a.cmdLs(rest)
 	case "rm":
 		return a.cmdRm(rest)
+	case "doctor":
+		return a.cmdDoctor(rest)
 	case "-h", "--help", "help":
 		fmt.Fprint(a.stdout, usageText)
 		return exitOK
