@@ -94,6 +94,24 @@ func TestGet_StderrNotFoundMessage(t *testing.T) {
 	}
 }
 
+// TestGet_LockedKeychainStderrContainsPhraseIsUnreadable pins kr-jqi: a
+// non-44 failure (exit 51, locked/denied-ish) whose stderr merely CONTAINS
+// the not-found phrase — without being the exact known message — must still
+// classify as ErrUnreadable. Otherwise Has would report safe-to-overwrite
+// over a keychain slot that actually holds a live secret.
+func TestGet_LockedKeychainStderrContainsPhraseIsUnreadable(t *testing.T) {
+	bin, _ := stubSecurity(t, "echo 'SecKeychainFindGenericPassword: the item could not be found because the keychain is locked' >&2\nexit 51\n")
+	s := newTestStore(t, bin)
+
+	_, err := s.Get("acct")
+	if !errors.Is(err, ErrUnreadable) {
+		t.Errorf("want ErrUnreadable, got %v", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("a non-exact stderr match on a non-44 exit must NEVER classify as ErrNotFound")
+	}
+}
+
 func TestGet_OtherFailureIsUnreadableNotAbsent(t *testing.T) {
 	for name, script := range map[string]string{
 		"exit1":  "exit 1\n",  // generic failure
