@@ -911,3 +911,52 @@ func TestLiveKeychain(t *testing.T) {
 		t.Fatalf("live Get: err=%v, len(got)=%d, want len=%d matched", err, len(got), len(val))
 	}
 }
+
+// TestDelete_ArgvContract pins the delete command line: attributes only
+// (service, account) on argv, plus the pinned keychain as the trailing
+// positional when WithKeychain is set.
+func TestDelete_ArgvContract(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	if err := s.Delete("acct"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	argv := readCapture(t, dir, "argv")
+	want := "delete-generic-password\n-s\nkeyring-test\n-a\nacct\n"
+	if argv != want {
+		t.Errorf("argv = %q, want %q", argv, want)
+	}
+}
+
+// TestDelete_NotFoundVsUnreadable pins delete's classification: exit 44 is a
+// CONFIRMED absence (ErrNotFound), any other failure is ErrUnreadable.
+func TestDelete_NotFoundVsUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   error
+	}{
+		{"exit 44 is not found", "exit 44\n", ErrNotFound},
+		{"exit 51 is unreadable", "exit 51\n", ErrUnreadable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, _ := stubSecurity(t, tc.script)
+			s := newTestStore(t, bin)
+			if err := s.Delete("acct"); !errors.Is(err, tc.want) {
+				t.Errorf("Delete: got %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestDelete_RejectsEmptyAccount pins the same empty-account guard Set has:
+// an empty account must not address the shared unnamed slot.
+func TestDelete_RejectsEmptyAccount(t *testing.T) {
+	bin, _ := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, acct := range []string{"", "  "} {
+		if err := s.Delete(acct); err == nil {
+			t.Errorf("Delete(%q): want error, got nil", acct)
+		}
+	}
+}

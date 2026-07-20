@@ -144,6 +144,32 @@ func quoteToken(s string) string {
 	return `"` + s + `"`
 }
 
+// delete removes one item via `security delete-generic-password`. Only
+// attributes ride the argv — service and account are not secrets — and the
+// command never reads or prints the stored value. Classification mirrors
+// get: exit 44 / the exact not-found sentence is a CONFIRMED absence
+// (ErrNotFound); anything else is ErrUnreadable, never proof the item was
+// gone.
+func (s *Store) delete(account string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	args := []string{"delete-generic-password", "-s", s.service, "-a", account}
+	// A pinned keychain goes last, the same trailing-positional shape as
+	// get/write — see WithKeychain.
+	if s.keychain != "" {
+		args = append(args, s.keychain)
+	}
+	cmd := exec.CommandContext(ctx, s.securityBin, args...)
+	cmd.WaitDelay = time.Second // see get: bound the post-kill pipe wait
+	if _, err := cmd.Output(); err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("keyring: %q %w under service %q", account, ErrNotFound, s.service)
+		}
+		return fmt.Errorf("keyring: deleting %q under service %q: %w", account, s.service, ErrUnreadable)
+	}
+	return nil
+}
+
 // notFoundStderrMessage is the EXACT text `security` emits on some builds
 // for a confirmed item-not-found when it exits non-44 instead. isNotFound
 // requires this FULL sentence, not a fragment: a fragment match

@@ -25,6 +25,10 @@ func (s *Store) writeIfAbsent(account, _ string) error {
 	return fmt.Errorf("keyring: storing %q under service %q: %w", account, s.service, ErrUnsupported)
 }
 
+func (s *Store) delete(account string) error {
+	return fmt.Errorf("keyring: deleting %q under service %q: %w", account, s.service, ErrUnsupported)
+}
+
 // List returns ErrUnsupported on every non-darwin build — no keychain
 // backend is compiled in. LoadManifest, by contrast, has no build tag and
 // works everywhere; only the enumeration calls that hit `security` are

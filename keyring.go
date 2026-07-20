@@ -408,6 +408,28 @@ func (s *Store) Has(account string) (bool, error) {
 	}
 }
 
+// Delete removes the item stored under account. A confirmed item-not-found
+// is reported as ErrNotFound so a caller can tell "already gone" from a
+// deletion that could not run (ErrUnreadable: locked, denied, timed out).
+//
+// Like every other operation here, Delete addresses items by (service,
+// account) through the `security` CLI, which acts on the FIRST match in the
+// search list — under a duplicate-item ambiguity (see WithKeychain) one
+// Delete removes one item, not the whole group. Honors WithKeychain to pin
+// which keychain is targeted.
+func (s *Store) Delete(account string) error {
+	if disabled() {
+		return errDisabled()
+	}
+	if strings.TrimSpace(account) == "" {
+		return errors.New("keyring: account name must not be empty")
+	}
+	if err := printableASCIIOnly("account", account); err != nil {
+		return err
+	}
+	return s.delete(account)
+}
+
 // GetOrEnv reads keychain-first and falls back to os.Getenv(envVar) when the
 // keychain CONFIRMS absence (ErrNotFound) or no backend exists
 // (ErrUnsupported). ErrUnreadable does NOT fall through: a locked or denied
