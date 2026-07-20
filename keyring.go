@@ -185,6 +185,11 @@ func (s *Store) Get(account string) (string, error) {
 // moves on. The value is piped to `security` on stdin, never placed on its
 // argv, so it cannot appear in a process-table snapshot.
 //
+// Empty or whitespace-only account names are rejected, mirroring the empty
+// service-name check in New: every empty-account write in a service would
+// otherwise land on one shared slot, with -U silently overwriting whatever
+// was already there.
+//
 // The write and the read-back are two separate `security` executions with no
 // lock or transaction spanning the gap between them: an ErrVerifyFailed
 // return is therefore INDETERMINATE, not confirmation the value was never
@@ -193,6 +198,9 @@ func (s *Store) Get(account string) (string, error) {
 func (s *Store) Set(account, value string) error {
 	if disabled() {
 		return errDisabled()
+	}
+	if strings.TrimSpace(account) == "" {
+		return errors.New("keyring: account name must not be empty")
 	}
 	if err := printableASCIIOnly("account", account); err != nil {
 		return err

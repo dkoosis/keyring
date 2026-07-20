@@ -270,6 +270,26 @@ func TestSet_RejectsNonASCII(t *testing.T) {
 	}
 }
 
+// TestSet_RejectsEmptyAccount pins kr-rjx: New rejects an empty/whitespace
+// service name to stop two sloppy callers from colliding in an unnamed
+// namespace, but Set left the symmetric account-side hole open — every
+// empty-account write in a service landed on one shared slot, with -U
+// silently overwriting whatever was there. Set must refuse before any
+// security invocation happens.
+func TestSet_RejectsEmptyAccount(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, bad := range []string{"", "   ", "\t"} {
+		if err := s.Set(bad, "v"); err == nil {
+			t.Errorf("Set(%q, ...): no error; empty/whitespace-only account must be rejected", bad)
+		}
+	}
+	// No security invocation may have happened for rejected input.
+	if _, err := os.Stat(filepath.Join(dir, "argv")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("security was invoked for rejected input (argv capture exists, stat err=%v)", err)
+	}
+}
+
 func TestSet_ReadBackMismatchIsVerifyFailed(t *testing.T) {
 	bin, _ := stubSecurity(t, `case "$1" in
 find-generic-password) printf 'WRONG\n' ;;
