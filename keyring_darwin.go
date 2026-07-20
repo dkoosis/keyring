@@ -72,7 +72,15 @@ func (s *Store) write(account, value string) error {
 		" -s " + quoteToken(s.service) +
 		" -a " + quoteToken(account) +
 		" -w " + quoteToken(value) + "\n")
+	// Capture stderr: cmd.Run leaves it nil, so a locked-keychain or
+	// permission-denied message from `security` would otherwise be discarded.
+	// Folding it into the error makes write failures diagnosable.
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return fmt.Errorf("keyring: storing %q: %w: %s", account, err, strings.TrimSpace(stderr.String()))
+		}
 		return fmt.Errorf("keyring: storing %q: %w", account, err)
 	}
 	return nil
