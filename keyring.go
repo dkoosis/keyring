@@ -107,6 +107,20 @@ func printableASCIIOnly(what, s string) error {
 	return nil
 }
 
+// printableASCIIOnlySecret is printableASCIIOnly for secret VALUES: same
+// validation, but the error never echoes the offending rune, since that rune
+// is a byte of the secret and would otherwise leak into error text and logs.
+// Non-secret fields (service name, account) keep the rune in their error via
+// printableASCIIOnly — it aids debugging and leaks nothing.
+func printableASCIIOnlySecret(what, s string) error {
+	for _, r := range s {
+		if r < 0x20 || r > 0x7e {
+			return fmt.Errorf("keyring: %s must be printable ASCII (0x20-0x7e); encode non-ASCII or multi-line material (e.g. base64) before storing", what)
+		}
+	}
+	return nil
+}
+
 // errDisabled is the ErrUnsupported-wrapping error every operation returns
 // while the kill-switch is set; it names the env var so an unexpectedly inert
 // keychain is diagnosable from the error text alone.
@@ -216,7 +230,7 @@ func (s *Store) Set(account, value string) error {
 	if err := printableASCIIOnly("account", account); err != nil {
 		return err
 	}
-	if err := printableASCIIOnly("value", value); err != nil {
+	if err := printableASCIIOnlySecret("value", value); err != nil {
 		return err
 	}
 	if err := s.write(account, value); err != nil {
