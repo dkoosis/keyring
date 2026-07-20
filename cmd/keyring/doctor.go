@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dkoosis/keyring"
@@ -29,9 +30,11 @@ type finding struct {
 func (a *app) cmdDoctor(args []string) int {
 	var c common
 	var fix, yes bool
+	var manifestPath string
 	fs := a.newFlagSet("doctor", &c)
 	fs.BoolVar(&fix, "fix", false, "apply the fixable findings (each confirmed; --yes to skip)")
 	fs.BoolVar(&yes, "yes", false, "skip per-fix confirmations (required with --fix when stdin is not a terminal)")
+	fs.StringVar(&manifestPath, "manifest", "", "keyring.json declaring the expected accounts (default: auto-discover)")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return exitValidation
@@ -45,17 +48,78 @@ func (a *app) cmdDoctor(args []string) int {
 		return a.fail(&c, "doctor", exitValidation, "refusing to fix without confirmation\n  → add --yes to fix non-interactively")
 	}
 
-	findings := a.runChecks(&c)
+	// The manifest is optional: absent, doctor still runs every probe-based
+	// check; only the expected/orphan diff needs the declaration. An
+	// explicitly named manifest that fails to load IS an error — the caller
+	// asked for it.
+	manifest, err := discoverManifest(manifestPath, c.service)
+	if err != nil {
+		return a.fail(&c, "doctor", exitValidation, err.Error())
+	}
+
+	findings := a.runChecks(&c, manifest)
 	if fix {
 		findings = a.applyFixes(&c, findings, yes)
 	}
 	return a.reportDoctor(&c, findings)
 }
 
+// discoverManifest resolves the keyring.json to diff against: explicit path
+// → ./keyring.json → $XDG_CONFIG_HOME/<service>/keyring.json (design §5).
+// Absent everywhere is fine (nil manifest, probe-only doctor). A manifest
+// naming a DIFFERENT service is an error — diffing svc A's keychain against
+// svc B's declaration would produce confident nonsense.
+func discoverManifest(explicit, service string) (*keyring.Manifest, error) {
+	path := explicit
+	if path == "" {
+		for _, cand := range []string{"keyring.json", filepath.Join(xdgConfigHome(), service, "keyring.json")} {
+			if _, err := os.Stat(cand); err == nil {
+				path = cand
+				break
+			}
+		}
+		if path == "" {
+			return nil, nil
+		}
+	}
+	m, err := keyring.LoadManifest(path)
+	if err != nil {
+		return nil, err
+	}
+	if m.Service != service {
+		return nil, fmt.Errorf("manifest %q declares service %q, not %q\n  → run: keyring doctor %s", path, m.Service, service, m.Service)
+	}
+	return m, nil
+}
+
+func xdgConfigHome() string {
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return x
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config")
+}
+
+// manifestEnv returns the declared env var for account, or the naming
+// convention when the manifest doesn't cover it.
+func manifestEnv(m *keyring.Manifest, service, account string) string {
+	if m != nil {
+		for _, acc := range m.Accounts {
+			if acc.Account == account && acc.Env != "" {
+				return acc.Env
+			}
+		}
+	}
+	return envVarFor(service, account)
+}
+
 // runChecks executes the probe list in order. A disabled kill-switch or an
 // unreadable dump short-circuits the per-item probes — there is nothing
 // trustworthy left to read.
-func (a *app) runChecks(c *common) []finding {
+func (a *app) runChecks(c *common, manifest *keyring.Manifest) []finding {
 	var findings []finding
 
 	// Check 5 — KEYRING_DISABLE. Info, not error: an intentional bypass is
@@ -108,6 +172,40 @@ func (a *app) runChecks(c *common) []finding {
 		}
 	}
 
+	// Check 1 + orphan diff — only with a manifest to diff against (§5).
+	// A gap is an error: the app cannot work without a required credential.
+	// An orphan is a recommendation, never an auto-delete.
+	if manifest != nil {
+		present := map[string]bool{}
+		for _, it := range items {
+			present[it.Account] = true
+		}
+		declared := map[string]bool{}
+		for _, acc := range manifest.Accounts {
+			declared[acc.Account] = true
+			if acc.Required && !present[acc.Account] {
+				fix := "keyring set " + c.service + " " + acc.Account
+				if acc.ObtainURL != "" {
+					fix = "get a key: " + acc.ObtainURL + " → then: " + fix
+				}
+				findings = append(findings, finding{
+					Check: "missing", Severity: "error", Account: acc.Account,
+					Finding: fmt.Sprintf("missing: %s/%s (%s)", c.service, acc.Account, acc.Description),
+					Fix:     fix,
+				})
+			}
+		}
+		for _, it := range items {
+			if !declared[it.Account] {
+				findings = append(findings, finding{
+					Check: "orphan", Severity: "warn", Account: it.Account,
+					Finding: fmt.Sprintf("orphan: %s/%s (stored, not declared in the manifest)", c.service, it.Account),
+					Fix:     "keyring rm " + c.service + " " + it.Account,
+				})
+			}
+		}
+	}
+
 	// Per-item probes: readability (2), trailing newline (7), non-ASCII (8),
 	// env shadowing (6).
 	for _, it := range items {
@@ -137,7 +235,7 @@ func (a *app) runChecks(c *common) []finding {
 				Fix:     "if wrong, re-store base64-encoded: base64 | keyring set " + c.service + " " + it.Account + " --stdin --force",
 			})
 		}
-		envVar := envVarFor(c.service, it.Account)
+		envVar := manifestEnv(manifest, c.service, it.Account)
 		if ev := os.Getenv(envVar); ev != "" && ev != v {
 			findings = append(findings, finding{
 				Check: "env_shadowing", Severity: "warn", Account: it.Account,

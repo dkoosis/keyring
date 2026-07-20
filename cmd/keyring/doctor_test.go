@@ -212,3 +212,94 @@ func TestHexLooking(t *testing.T) {
 		}
 	}
 }
+
+// writeManifest writes a keyring.json into a temp dir and returns its path.
+func writeManifest(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "keyring.json")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestDoctor_ManifestGapAndOrphan pins check 1 + the orphan diff: a required
+// declared account with no item is an error carrying the obtain_url; a
+// stored item with no declaration is a warn recommending rm.
+func TestDoctor_ManifestGapAndOrphan(t *testing.T) {
+	clearDisable(t)
+	// Keychain holds only "anthropic"; the manifest requires "voyage" and
+	// does not declare "anthropic".
+	bin, _ := doctorStub(t, dumpOneClean, map[string]string{"anthropic": "sk-clean-value-123"})
+	mp := writeManifest(t, `{"version":1,"service":"svc","accounts":[
+	  {"account":"voyage","env":"SVC_VOYAGE_API_KEY","required":true,
+	   "description":"Voyage embeddings key","obtain_url":"https://dash.voyageai.com"}]}`)
+	a, out, _ := newTestApp(bin, "")
+	a.jsonRun(t, []string{"doctor", "svc", "--manifest", mp, "--json"}, exitDoctorFindings, func(m map[string]any) {
+		var gap, orphan map[string]any
+		for _, x := range m["findings"].([]any) {
+			f := x.(map[string]any)
+			switch f["check"] {
+			case "missing":
+				gap = f
+			case "orphan":
+				orphan = f
+			}
+		}
+		if gap == nil || gap["severity"] != "error" || gap["account"] != "voyage" {
+			t.Errorf("gap = %v", gap)
+		}
+		if !strings.Contains(gap["fix"].(string), "https://dash.voyageai.com") ||
+			!strings.Contains(gap["fix"].(string), "keyring set svc voyage") {
+			t.Errorf("gap fix = %v", gap["fix"])
+		}
+		if orphan == nil || orphan["severity"] != "warn" || orphan["account"] != "anthropic" {
+			t.Errorf("orphan = %v", orphan)
+		}
+		if !strings.Contains(orphan["fix"].(string), "keyring rm svc anthropic") {
+			t.Errorf("orphan fix = %v", orphan["fix"])
+		}
+	}, out)
+}
+
+// TestDoctor_ManifestEnvNameFeedsShadowCheck pins §5: a manifest env
+// override (not the naming convention) is what check 6 compares against.
+func TestDoctor_ManifestEnvNameFeedsShadowCheck(t *testing.T) {
+	clearDisable(t)
+	t.Setenv("TELEGRAM_BOT_TOKEN", "stale-different-token")
+	bin, _ := doctorStub(t, `keychain: "/Users/x/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    "acct"<blob>="telegram"
+    "svce"<blob>="svc"`, map[string]string{"telegram": "real-token-1234567"})
+	mp := writeManifest(t, `{"version":1,"service":"svc","accounts":[
+	  {"account":"telegram","env":"TELEGRAM_BOT_TOKEN","required":true}]}`)
+	a, out, _ := newTestApp(bin, "")
+	a.jsonRun(t, []string{"doctor", "svc", "--manifest", mp, "--json"}, exitDoctorFindings, func(m map[string]any) {
+		found := false
+		for _, x := range m["findings"].([]any) {
+			f := x.(map[string]any)
+			if f["check"] == "env_shadowing" && strings.Contains(f["finding"].(string), "TELEGRAM_BOT_TOKEN") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no env_shadowing finding naming TELEGRAM_BOT_TOKEN: %v", m["findings"])
+		}
+	}, out)
+}
+
+// TestDoctor_ManifestServiceMismatchFails pins the guard: diffing against
+// another service's manifest is refused up front.
+func TestDoctor_ManifestServiceMismatchFails(t *testing.T) {
+	clearDisable(t)
+	bin, _ := doctorStub(t, dumpOneClean, nil)
+	mp := writeManifest(t, `{"version":1,"service":"other","accounts":[]}`)
+	a, _, errOut := newTestApp(bin, "")
+	if code := a.run([]string{"doctor", "svc", "--manifest", mp}); code != exitValidation {
+		t.Fatalf("exit = %d, want %d", code, exitValidation)
+	}
+	if !strings.Contains(errOut.String(), `declares service "other"`) {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}

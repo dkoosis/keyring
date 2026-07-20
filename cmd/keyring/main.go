@@ -386,6 +386,18 @@ func (a *app) cmdSet(args []string) int {
 		return a.fail(&c, "set", exitValidation, err.Error()+"\n  → keyring set <service> <account>")
 	}
 
+	// Before the hidden prompt, tell the human where this credential comes
+	// from when a discovered manifest declares it (design §5, obtain_url).
+	if a.stdinTTY && !useStdin {
+		if m, err := discoverManifest("", c.service); err == nil && m != nil {
+			for _, acc := range m.Accounts {
+				if acc.Account == c.account && acc.ObtainURL != "" {
+					fmt.Fprintf(a.stderr, "get it here: %s\n", acc.ObtainURL)
+				}
+			}
+		}
+	}
+
 	value, stripped, err := a.readValue(useStdin, c.service, c.account)
 	if err != nil {
 		return a.fail(&c, "set", exitGeneric, err.Error())
