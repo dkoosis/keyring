@@ -55,6 +55,14 @@ func TestNew_RejectsEmptyService(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsNonPositiveTimeout(t *testing.T) {
+	for _, d := range []time.Duration{0, -1 * time.Second} {
+		if _, err := New("svc", WithTimeout(d)); err == nil {
+			t.Errorf("New with WithTimeout(%s): want error, got nil", d)
+		}
+	}
+}
+
 func TestGet_ArgvContract(t *testing.T) {
 	bin, dir := stubSecurity(t, "printf 'the-secret\\n'\nexit 0\n")
 	s := newTestStore(t, bin)
@@ -237,6 +245,51 @@ func TestSet_RejectsControlChars(t *testing.T) {
 	}
 }
 
+// TestSet_RejectsNonASCII pins kr-yqk: `security find-generic-password -w`
+// hex-transcribes any stored value containing bytes >=0x80 on read-back (a
+// live repro stored 'café' and got the literal string '636166c3a9' with
+// err==nil). Since that corruption is undetectable at Get time (no marker
+// distinguishes a hex transcription from a real hex-looking secret), the only
+// sound contract is to refuse to store non-ASCII in the first place — for
+// both the value and the account (which also rides the `security -i` command
+// line).
+func TestSet_RejectsNonASCII(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, bad := range []string{"café", "emoji🔑token", "élite"} {
+		if err := s.Set("acct", bad); err == nil {
+			t.Errorf("Set(%q): no error; non-ASCII values must be rejected", bad)
+		}
+	}
+	if err := s.Set("café-acct", "v"); err == nil {
+		t.Error("Set with non-ASCII account: no error; must be rejected")
+	}
+	// No security invocation may have happened for rejected inputs.
+	if _, err := os.Stat(filepath.Join(dir, "argv")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("security was invoked for rejected input (argv capture exists, stat err=%v)", err)
+	}
+}
+
+// TestSet_RejectsEmptyAccount pins kr-rjx: New rejects an empty/whitespace
+// service name to stop two sloppy callers from colliding in an unnamed
+// namespace, but Set left the symmetric account-side hole open — every
+// empty-account write in a service landed on one shared slot, with -U
+// silently overwriting whatever was there. Set must refuse before any
+// security invocation happens.
+func TestSet_RejectsEmptyAccount(t *testing.T) {
+	bin, dir := stubSecurity(t, "exit 0\n")
+	s := newTestStore(t, bin)
+	for _, bad := range []string{"", "   ", "\t"} {
+		if err := s.Set(bad, "v"); err == nil {
+			t.Errorf("Set(%q, ...): no error; empty/whitespace-only account must be rejected", bad)
+		}
+	}
+	// No security invocation may have happened for rejected input.
+	if _, err := os.Stat(filepath.Join(dir, "argv")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("security was invoked for rejected input (argv capture exists, stat err=%v)", err)
+	}
+}
+
 func TestSet_ReadBackMismatchIsVerifyFailed(t *testing.T) {
 	bin, _ := stubSecurity(t, `case "$1" in
 find-generic-password) printf 'WRONG\n' ;;
@@ -265,6 +318,48 @@ exit 0
 	}
 	if !errors.Is(err, ErrUnreadable) {
 		t.Errorf("want chained ErrUnreadable cause, got %v", err)
+	}
+}
+
+// TestSet_ValuePersistsPastFailedVerify pins the ErrVerifyFailed-is-
+// indeterminate contract (kr-4cd): the write (`security -i`) and the
+// read-back (`find-generic-password`) are two separate executions with
+// nothing spanning the gap, so a read-back failure right after a successful
+// write does not mean the value was never stored. The stub makes
+// add-generic-password succeed unconditionally, then fails the FIRST
+// find-generic-password call (simulating a lock/deny landing between write
+// and verify) while a SECOND, later call succeeds and returns the written
+// value — proving the write persisted past the failed verify, exactly what
+// Set must not treat as "not stored".
+func TestSet_ValuePersistsPastFailedVerify(t *testing.T) {
+	bin, _ := stubSecurity(t, `case "$1" in
+find-generic-password)
+  cf="$(dirname "$0")/find-count"
+  n=0
+  [ -f "$cf" ] && n=$(cat "$cf")
+  n=$((n+1))
+  echo "$n" > "$cf"
+  if [ "$n" -eq 1 ]; then exit 1; fi
+  printf 'right\n'
+  ;;
+esac
+exit 0
+`)
+	s := newTestStore(t, bin)
+
+	err := s.Set("acct", "right")
+	if !errors.Is(err, ErrVerifyFailed) {
+		t.Fatalf("Set: want ErrVerifyFailed on the first (failing) read-back, got %v", err)
+	}
+
+	// A later, independent Get succeeds and returns the value the write
+	// stored — the ErrVerifyFailed above was indeterminate, not "unwritten".
+	got, err := s.Get("acct")
+	if err != nil {
+		t.Fatalf("Get after failed verify: %v", err)
+	}
+	if got != "right" {
+		t.Errorf("Get after failed verify = %q, want %q (value must persist past a failed verify)", got, "right")
 	}
 }
 

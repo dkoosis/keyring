@@ -1,8 +1,19 @@
 // Package keyring stores and retrieves secrets in the macOS keychain via the
 // `security` CLI — no cgo, no third-party dependency. Secrets never appear on
 // a process argv, writes are verified by read-back, and "not found" is kept
-// strictly distinct from "could not read" so callers can use presence checks
-// as overwrite guards.
+// strictly distinct from "could not read" so callers get an honest answer to
+// "does this exist right now" — but that answer is a point-in-time read, not
+// an atomic guard: `security add-generic-password -U` unconditionally
+// overwrites on Set, so a concurrent writer between a caller's presence
+// check and its Set is clobbered with no error to either side. Has is
+// advisory, not a compare-and-swap; this package assumes one writer per
+// account. See Has.
+//
+// Service names, account names, and values must be printable ASCII
+// (0x20-0x7e): `security find-generic-password -w` hex-transcribes any
+// stored value containing a byte >=0x80 on read, indistinguishable from a
+// real value, so Set refuses non-ASCII input up front. Encode non-ASCII or
+// multi-line material (e.g. base64) before storing.
 //
 // On non-darwin builds every keychain operation returns ErrUnsupported;
 // GetOrEnv falls through to the environment there, so cross-platform callers
@@ -35,6 +46,21 @@ var (
 	// ErrVerifyFailed means the post-Set read-back failed or did not match
 	// the stored value. The returned error chains the underlying cause where
 	// one exists.
+	//
+	// INDETERMINATE, not "not written": write and read-back are two separate
+	// `security` invocations with no lock or transaction spanning the gap, so
+	// this error can fire while the value is durably stored — a concurrent
+	// Set to the same account landing in the gap (read-back sees the other
+	// writer's value; the keychain state is still consistent, last write
+	// wins), or the keychain locking/denying access after the write lands but
+	// before the read-back runs. A caller MUST NOT treat ErrVerifyFailed as
+	// proof the value is absent, and must not route the secret to a fallback
+	// store on this error — doing so risks two sources of truth for the same
+	// account. Set deliberately does not auto-rollback (delete the item) on
+	// this error either: a transient read failure is indistinguishable from
+	// the cases above, and rolling back could destroy a good pre-existing
+	// value that Set never touched. Retry Get (or Has) to resolve the
+	// uncertainty instead.
 	ErrVerifyFailed = errors.New("read-back verification failed")
 	// ErrUnsupported means no keychain backend is compiled into this binary
 	// (any non-darwin build).
@@ -59,17 +85,22 @@ const DisableEnv = "KEYRING_DISABLE"
 // disabled reports whether the DisableEnv kill-switch is set.
 func disabled() bool { return os.Getenv(DisableEnv) != "" }
 
-// noControlChars rejects strings containing control characters (anything
-// below 0x20, or DEL). Two reasons: a newline/CR would terminate or corrupt
-// the `security -i` command line the darwin write path feeds the CLI, and
-// `security find-generic-password -w` hex-mangles values with non-printable
-// bytes on read, so such a value could never round-trip anyway. Store
-// multi-line material (PEM keys) encoded — e.g. base64 — as canapay does for
-// its SFTP seed.
-func noControlChars(what, s string) error {
+// printableASCIIOnly rejects strings containing anything outside printable
+// ASCII (0x20-0x7e). Two reasons collapse into one check: a control
+// character (below 0x20, or DEL) would terminate or corrupt the
+// `security -i` command line the darwin write path feeds the CLI, and
+// `security find-generic-password -w` HEX-TRANSCRIBES any value containing a
+// byte >=0x80 on read-back instead of returning the original bytes — with
+// exit 0 and no marker distinguishing the transcription from a real value
+// (kr-yqk: storing "café" reads back as the literal string "636166c3a9", a
+// silently wrong credential, not an error). Rejecting >0x7e up front is the
+// only sound fix: Get cannot detect the corruption after the fact. Store
+// multi-line or non-ASCII material (PEM keys, secrets with accented/Unicode
+// characters) encoded — e.g. base64 — as canapay does for its SFTP seed.
+func printableASCIIOnly(what, s string) error {
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return fmt.Errorf("keyring: %s must not contain control characters (got %q); encode multi-line material (e.g. base64) before storing", what, r)
+		if r < 0x20 || r > 0x7e {
+			return fmt.Errorf("keyring: %s must be printable ASCII (got %q); encode non-ASCII or multi-line material (e.g. base64) before storing", what, r)
 		}
 	}
 	return nil
@@ -115,7 +146,7 @@ func New(service string, opts ...Option) (*Store, error) {
 	if strings.TrimSpace(service) == "" {
 		return nil, errors.New("keyring: service name must not be empty")
 	}
-	if err := noControlChars("service name", service); err != nil {
+	if err := printableASCIIOnly("service name", service); err != nil {
 		return nil, err
 	}
 	s := &Store{
@@ -126,6 +157,9 @@ func New(service string, opts ...Option) (*Store, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.timeout <= 0 {
+		return nil, fmt.Errorf("keyring: WithTimeout must be positive, got %s", s.timeout)
+	}
 	return s, nil
 }
 
@@ -135,7 +169,14 @@ func New(service string, opts ...Option) (*Store, error) {
 // from "secret absent".
 func Supported() bool { return supported && !disabled() }
 
-// Get reads the secret stored under account.
+// Get reads the secret stored under account. It assumes the stored value is
+// printable ASCII, the contract Set enforces on write — Get itself cannot
+// verify this. If an item was written by another tool (or Keychain Access)
+// with bytes >=0x80, `security find-generic-password -w` hex-transcribes
+// those bytes into an ASCII string with exit 0 and no error: Get would
+// return that hex string as if it were the real secret, silently wrong (see
+// printableASCIIOnly). Items written through this package never hit that
+// case; items written elsewhere might.
 func (s *Store) Get(account string) (string, error) {
 	if disabled() {
 		return "", errDisabled()
@@ -148,14 +189,28 @@ func (s *Store) Get(account string) (string, error) {
 // read-back turns that silent corruption into a hard error before the caller
 // moves on. The value is piped to `security` on stdin, never placed on its
 // argv, so it cannot appear in a process-table snapshot.
+//
+// Empty or whitespace-only account names are rejected, mirroring the empty
+// service-name check in New: every empty-account write in a service would
+// otherwise land on one shared slot, with -U silently overwriting whatever
+// was already there.
+//
+// The write and the read-back are two separate `security` executions with no
+// lock or transaction spanning the gap between them: an ErrVerifyFailed
+// return is therefore INDETERMINATE, not confirmation the value was never
+// stored — see ErrVerifyFailed. Callers must treat it as "unknown, go check"
+// (Get/Has), never as "not written".
 func (s *Store) Set(account, value string) error {
 	if disabled() {
 		return errDisabled()
 	}
-	if err := noControlChars("account", account); err != nil {
+	if strings.TrimSpace(account) == "" {
+		return errors.New("keyring: account name must not be empty")
+	}
+	if err := printableASCIIOnly("account", account); err != nil {
 		return err
 	}
-	if err := noControlChars("value", value); err != nil {
+	if err := printableASCIIOnly("value", value); err != nil {
 		return err
 	}
 	if err := s.write(account, value); err != nil {
@@ -173,11 +228,22 @@ func (s *Store) Set(account, value string) error {
 
 // Has reports whether a value is stored under account, returning an error the
 // caller MUST block on. The three outcomes are distinct:
-//   - (true, nil)  — the value is present.
-//   - (false, nil) — CONFIRMED not-found; safe to write.
+//   - (true, nil)  — the value was present at the moment of this read.
+//   - (false, nil) — CONFIRMED not-found at the moment of this read.
 //   - (false, err) — the slot could not be read (locked, denied, timed out);
 //     the caller must NOT treat this as absent, or a later overwrite could
 //     clobber a value that is actually there.
+//
+// Has is ADVISORY-ONLY, not an atomic overwrite guard: the result is stale
+// the instant it returns. Set writes with `security add-generic-password
+// -U` (update-if-exists), so a concurrent writer that stores a value in the
+// window between this call and a following Set is silently overwritten —
+// no error to either caller. The `security` CLI has no compare-and-swap;
+// this package cannot offer one. Treat (false, nil) as "no value seen just
+// now", and rely on it only when the account has a single writer. A future
+// SetIfAbsent (skip -U, map errSecDuplicateItem/exit 45 to a sentinel) could
+// close this gap for a single process, but that guard would still need to
+// live with the caller, not here.
 func (s *Store) Has(account string) (bool, error) {
 	_, err := s.Get(account)
 	switch {
