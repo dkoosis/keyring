@@ -1,0 +1,43 @@
+#!/usr/bin/env sh
+# commit-msg — enforce a conventional-commit type on the subject line.
+#
+# PRIMARY, local, instant layer. Installed GLOBALLY via
+# core.hooksPath (see scripts/install-hooks.sh) so one install covers every
+# repo. The CI backstop in .github/workflows/bot-review.yml (commit-lint job)
+# catches --no-verify bypass and direct pushes.
+#
+# Vocabulary — single source of truth, mirrored in bot-review.yml and
+# .claude/rules/plugin-dev.md: feat fix docs chore refactor test perf
+# bead-type -> commit-type:  bug->fix  feature->feat  chore->chore
+set -eu
+
+msg_file="${1:-}"
+if [ -z "$msg_file" ]; then
+  printf 'usage: commit-msg <commit-msg-file>\n' >&2
+  exit 1
+fi
+# Subject = first line that is neither blank nor a comment.
+subject="$(grep -vE '^[[:space:]]*#' "$msg_file" | grep -vE '^[[:space:]]*$' | head -n1)"
+
+# Let git-generated commits through — merge / revert / fixup / squash / amend.
+case "$subject" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*|"amend! "*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|docs|chore|refactor|test|perf)(\(.+\))?!?: .'
+if printf '%s' "$subject" | grep -Eq "$pattern"; then
+  exit 0
+fi
+
+cat >&2 <<EOF
+✗ commit rejected: subject must start with a conventional-commit type.
+
+  got:      $subject
+  expected: <type>[(scope)][!]: <summary>
+  types:    feat fix docs chore refactor test perf
+
+  bead-type -> commit-type:  bug->fix  feature->feat  chore->chore
+
+Fix the message, or bypass with --no-verify (CI will still flag it).
+EOF
+exit 1

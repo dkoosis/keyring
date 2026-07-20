@@ -1,0 +1,110 @@
+#!/usr/bin/env sh
+# pre-push — non-skippable ship gate at the git push choke point.
+#
+# Borrows the push-as-gate trigger from the no-mistakes project
+# (github.com/kunchenguid/no-mistakes): the mechanical ship gate is opt-in and
+# skippable when run only by hand or inside /ship-plugins. Firing it here
+# re-validates before the branch leaves the machine.
+#
+# Installed GLOBALLY via core.hooksPath (see scripts/install-hooks.sh) beside
+# commit-msg, so one install covers every repo. Repo-generic: the gate runs
+# ONLY when the pushed repo carries scripts/plugin-preflight.sh, so repos
+# without one pass untouched.
+#
+# Gates the CHANGED SET being pushed, not the whole repo (--all). A push that
+# touches no SKILL.md/command file passes clean; pre-existing debt in plugins
+# you aren't pushing never blocks you. This ratchets cleanup incrementally
+# instead of walling every push behind legacy findings.
+#
+# --no-verify bypasses this, same as commit-msg. A CI backstop that runs
+# preflight would close that hole (follow-up bead; out of scope here).
+set -eu
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$root" ] || { cat >/dev/null 2>&1 || true; exit 0; }
+
+gate="$root/scripts/plugin-preflight.sh"
+if [ ! -f "$gate" ]; then           # repo has no ship gate — nothing to enforce.
+  cat >/dev/null 2>&1 || true       # drain stdin so git stays happy.
+  exit 0
+fi
+
+# All-zero object id (length-correct for sha1 or sha256) marks a create/delete.
+zero="$(git hash-object -t blob /dev/null 2>/dev/null | tr '0-9a-f' '0')"
+
+# Resolve the default branch to diff new branches against (feature branch fork
+# point). First that exists wins; empty => fall back to the commit's root diff.
+default_ref=""
+for r in origin/main origin/master main master; do
+  if git rev-parse --verify --quiet "$r" >/dev/null 2>&1; then default_ref="$r"; break; fi
+done
+
+# stdin: <local_ref> <local_sha> <remote_ref> <remote_sha> per pushed ref.
+files="$(
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue          # branch deletion — nothing to check.
+    if [ "$remote_sha" = "$zero" ]; then            # new remote branch.
+      if [ -n "$default_ref" ]; then
+        base="$(git merge-base "$local_sha" "$default_ref" 2>/dev/null || true)"
+      else
+        base=""
+      fi
+    else
+      base="$remote_sha"
+    fi
+    if [ -n "$base" ]; then
+      git diff --name-only "$base" "$local_sha" 2>/dev/null || true
+    else
+      git diff --name-only "$local_sha" 2>/dev/null || true
+    fi
+  done | sort -u
+)"
+
+[ -n "$files" ] || exit 0           # nothing pushed that the gate cares about.
+
+# Feed the changed set as repo-relative paths; preflight ignores non-skill files.
+# shellcheck disable=SC2086
+if ( cd "$root" && bash "$gate" $files ); then
+  exit 0
+fi
+
+cat >&2 <<EOF
+
+✗ push rejected: plugin-preflight found blocking findings in the pushed changes (see ✗ above).
+
+Fix them, or bypass with --no-verify (CI backstop still applies).
+EOF
+exit 1
+
+# --- BEGIN BEADS INTEGRATION v1.1.0 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  _bd_used_perl=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  elif command -v perl >/dev/null 2>&1; then
+    _bd_used_perl=1
+    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  else
+    echo >&2 "beads: hook 'pre-push' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
+    bd hooks run pre-push "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+    echo >&2 "beads: hook 'pre-push' timed out after ${_bd_timeout}s — continuing without beads"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-push'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.1.0 ---
