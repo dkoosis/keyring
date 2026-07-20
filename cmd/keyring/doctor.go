@@ -301,36 +301,46 @@ func (a *app) applyFixes(c *common, findings []finding, yes bool) []finding {
 			}
 			f.Fixed = true
 		case "duplicate":
-			groups, err := keyring.DumpDuplicates(context.Background(), c.service, a.storeOpts(c)...)
-			if err != nil {
-				continue
-			}
-			for _, g := range groups {
-				if g.Account != f.Account {
-					continue
-				}
-				keep := pickKeeper(g.Items)
-				pruned := true
-				for _, it := range g.Items {
-					if it.Keychain == keep.Keychain {
-						continue
-					}
-					if !yes && !a.confirm(fmt.Sprintf("delete the duplicate %s/%s in %s (keeping the one in %s)?",
-						c.service, f.Account, it.Keychain, keep.Keychain)) {
-						pruned = false
-						continue
-					}
-					pinned, err := keyring.New(c.service, append(a.storeOpts(c), keyring.WithKeychain(it.Keychain))...)
-					if err != nil || pinned.Delete(f.Account) != nil {
-						pruned = false
-						continue
-					}
-				}
-				f.Fixed = pruned
-			}
+			f.Fixed = a.dedupeAccount(c, f.Account, yes)
 		}
 	}
 	return findings
+}
+
+// dedupeAccount deletes every duplicate item for (c.service, account)
+// except the keeper, each deletion pinned to its keychain file so exactly
+// the intended item goes. Each deletion confirms unless yes. Returns true
+// only when every extra item was removed. Shared by doctor --fix and
+// migrate.
+func (a *app) dedupeAccount(c *common, account string, yes bool) bool {
+	groups, err := keyring.DumpDuplicates(context.Background(), c.service, a.storeOpts(c)...)
+	if err != nil {
+		return false
+	}
+	for _, g := range groups {
+		if g.Account != account {
+			continue
+		}
+		keep := pickKeeper(g.Items)
+		pruned := true
+		for _, it := range g.Items {
+			if it.Keychain == keep.Keychain {
+				continue
+			}
+			if !yes && !a.confirm(fmt.Sprintf("delete the duplicate %s/%s in %s (keeping the one in %s)?",
+				c.service, account, it.Keychain, keep.Keychain)) {
+				pruned = false
+				continue
+			}
+			pinned, err := keyring.New(c.service, append(a.storeOpts(c), keyring.WithKeychain(it.Keychain))...)
+			if err != nil || pinned.Delete(account) != nil {
+				pruned = false
+				continue
+			}
+		}
+		return pruned
+	}
+	return false
 }
 
 // pickKeeper chooses which duplicate survives a dedupe: the login-keychain

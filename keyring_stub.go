@@ -37,6 +37,14 @@ func (s *Store) List(_ context.Context) ([]Item, error) {
 	return nil, fmt.Errorf("keyring: listing service %q: %w", s.service, ErrUnsupported)
 }
 
+// DumpItems returns ErrUnsupported on every non-darwin build, matching List.
+func DumpItems(_ context.Context, opts ...Option) ([]ServiceItem, error) {
+	if _, err := New("keyring-dump", opts...); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("keyring: listing items: %w", ErrUnsupported)
+}
+
 // DumpDuplicates returns ErrUnsupported on every non-darwin build. It still
 // validates service/opts via New so a caller sees the same argument errors
 // on every platform, not just darwin.

@@ -109,10 +109,12 @@ usage:
   keyring ls  <service>             list items under a service (never prints values)
   keyring rm  <service> <account>   delete an item (confirms; --yes to skip)
   keyring doctor <service>          diagnose items; --fix heals what it safely can
+  keyring migrate <service>         plan + apply legacy repairs (rename, dedupe, trim)
 
 global flags: --json  --keychain <abs-path>  --timeout <duration>
 set flags:    --stdin  --force     get flags: --raw
-rm flags:     --yes                doctor flags: --fix --yes
+rm flags:     --yes                doctor flags: --fix --yes --manifest <path>
+migrate flags: --yes
 
 exit codes: 0 ok · 2 validation · 3 not found · 4 unreadable/locked ·
             5 verify failed · 6 already exists · 7 unsupported/disabled ·
@@ -136,6 +138,8 @@ func (a *app) run(args []string) int {
 		return a.cmdRm(rest)
 	case "doctor":
 		return a.cmdDoctor(rest)
+	case "migrate":
+		return a.cmdMigrate(rest)
 	case "-h", "--help", "help":
 		fmt.Fprint(a.stdout, usageText)
 		return exitOK

@@ -306,6 +306,37 @@ func DumpDuplicates(ctx context.Context, service string, opts ...Option) ([]Dupl
 	return groups, nil
 }
 
+// DumpItems scans the whole default keychain search list and returns every
+// generic-password item as (service, account, keychain) — attributes only,
+// via the same `security dump-keychain` path as List/DumpDuplicates, so no
+// secret bytes are ever read. This is the cross-service enumeration the
+// legacy-rename migration needs: finding items under OLD service names that
+// a service-scoped List cannot see. Any WithKeychain in opts is ignored —
+// a legacy item's whole problem is living somewhere unexpected.
+func DumpItems(ctx context.Context, opts ...Option) ([]ServiceItem, error) {
+	if disabled() {
+		return nil, errDisabled()
+	}
+	// The service name on this Store is only a placeholder to satisfy New's
+	// validation; DumpItems never filters on it.
+	s, err := New("keyring-dump", opts...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.runDumpKeychain(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	var items []ServiceItem
+	for _, e := range parseDumpKeychain(out) {
+		items = append(items, ServiceItem{
+			Service: e.service,
+			Item:    Item{Account: e.account, Keychain: e.keychain},
+		})
+	}
+	return items, nil
+}
+
 // runDumpKeychain runs `security dump-keychain` — WITHOUT -w and WITHOUT -d,
 // so the "data:" section (if present at all) is never populated with the
 // actual secret bytes; this command line cannot read a value even by

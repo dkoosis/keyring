@@ -155,6 +155,15 @@ type Item struct {
 	Keychain string // absolute path to the keychain file this item lives in
 }
 
+// ServiceItem is one keychain entry with its service attached — the
+// cross-service sibling of Item, returned by DumpItems for callers (the CLI's
+// legacy-rename migration, a future `ls --all`) that must see items OUTSIDE
+// one store's service. Attributes only, never secret bytes, same as Item.
+type ServiceItem struct {
+	Service string
+	Item
+}
+
 // DuplicateGroup is every item found under one (service, account) pair when
 // more than one exists across the search list — the ambiguity WithKeychain
 // exists to close (see WithKeychain's doc comment). DumpDuplicates only ever
