@@ -63,6 +63,14 @@ func TestNew_RejectsNonPositiveTimeout(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsRelativeSecurityBin(t *testing.T) {
+	for _, bin := range []string{"security", "./security", "../bin/security"} {
+		if _, err := New("svc", WithSecurityBin(bin)); err == nil {
+			t.Errorf("New with WithSecurityBin(%q): want error, got nil", bin)
+		}
+	}
+}
+
 func TestGet_ArgvContract(t *testing.T) {
 	bin, dir := stubSecurity(t, "printf 'the-secret\\n'\nexit 0\n")
 	s := newTestStore(t, bin)
