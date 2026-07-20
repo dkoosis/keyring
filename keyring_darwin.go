@@ -70,11 +70,51 @@ func (s *Store) get(account string) (string, error) {
 // `"` in the value are escaped; control characters (which would terminate or
 // corrupt the command line) are rejected up front by validSecret via Set.
 func (s *Store) write(account, value string) error {
+	stderr, err := s.doWrite(account, value, true)
+	if err != nil {
+		if stderr != "" {
+			return fmt.Errorf("keyring: storing %q: %w: %s", account, err, strings.TrimSpace(stderr))
+		}
+		return fmt.Errorf("keyring: storing %q: %w", account, err)
+	}
+	return nil
+}
+
+// writeIfAbsent stores value under account WITHOUT -U: `security
+// add-generic-password` then fails with a confirmed duplicate-item error
+// (see isDuplicateItem) instead of silently overwriting an existing item.
+// That failure is mapped to ErrExists; everything else — secret-on-stdin,
+// quoting, WithKeychain — matches write. See SetIfAbsent.
+func (s *Store) writeIfAbsent(account, value string) error {
+	stderr, err := s.doWrite(account, value, false)
+	if err != nil {
+		if isDuplicateItem(err, stderr) {
+			return fmt.Errorf("keyring: %q %w under service %q", account, ErrExists, s.service)
+		}
+		if stderr != "" {
+			return fmt.Errorf("keyring: storing %q: %w: %s", account, err, strings.TrimSpace(stderr))
+		}
+		return fmt.Errorf("keyring: storing %q: %w", account, err)
+	}
+	return nil
+}
+
+// doWrite runs `security -i` with an add-generic-password command line,
+// with or without -U per update, and returns captured stderr alongside
+// whatever error cmd.Run produced. write and writeIfAbsent classify that
+// error differently (generic failure vs. confirmed duplicate-item), so the
+// process-invocation plumbing lives here once and the classification stays
+// in each caller.
+func (s *Store) doWrite(account, value string, update bool) (stderr string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.securityBin, "-i")
 	cmd.WaitDelay = time.Second // see get: bound the post-kill pipe wait
-	line := "add-generic-password -U" +
+	verb := "add-generic-password"
+	if update {
+		verb += " -U"
+	}
+	line := verb +
 		" -s " + quoteToken(s.service) +
 		" -a " + quoteToken(account) +
 		" -w " + quoteToken(value)
@@ -85,18 +125,14 @@ func (s *Store) write(account, value string) error {
 		line += " " + quoteToken(s.keychain)
 	}
 	cmd.Stdin = strings.NewReader(line + "\n")
-	// Capture stderr: cmd.Run leaves it nil, so a locked-keychain or
-	// permission-denied message from `security` would otherwise be discarded.
-	// Folding it into the error makes write failures diagnosable.
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return fmt.Errorf("keyring: storing %q: %w: %s", account, err, strings.TrimSpace(stderr.String()))
-		}
-		return fmt.Errorf("keyring: storing %q: %w", account, err)
-	}
-	return nil
+	// Capture stderr: cmd.Run leaves it nil, so a locked-keychain, duplicate-
+	// item, or permission-denied message from `security` would otherwise be
+	// discarded. Folding it into the error (or classifying on it) makes
+	// failures diagnosable.
+	var errBuf strings.Builder
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return errBuf.String(), err
 }
 
 // quoteToken wraps a token for the `security -i` command tokenizer:
@@ -137,4 +173,40 @@ func isNotFound(err error) bool {
 		return true
 	}
 	return strings.Contains(string(exitErr.Stderr), notFoundStderrMessage)
+}
+
+// duplicateItemExit is `security`'s exit status for a CONFIRMED duplicate
+// item on an unconditional add-generic-password (errSecDuplicateItem
+// surfaced by the CLI) — the failure writeIfAbsent relies on instead of -U's
+// silent overwrite. Mirrors notFoundExit's role for find-generic-password.
+const duplicateItemExit = 45
+
+// duplicateItemStderrMessage is the fallback text match for a duplicate-item
+// failure, mirroring notFoundStderrMessage: some builds may report a
+// duplicate item via stderr text rather than (or alongside) exit 45.
+// Contains, not equality, for the same reason as notFoundStderrMessage —
+// macOS tools routinely emit dyld/objc noise on stderr alongside the real
+// message.
+const duplicateItemStderrMessage = "The specified item already exists in the keychain."
+
+// isDuplicateItem reports whether an add-generic-password failure is a
+// CONFIRMED duplicate item — exit status 45, or stderr containing the exact
+// full duplicate-item sentence. Anything else must not be classified as
+// ErrExists: writeIfAbsent's caller (SetIfAbsent) treats every other failure
+// as an ordinary write error, never as "the item is already there".
+//
+// Unlike isNotFound, which reads exitErr.Stderr (populated by cmd.Output()),
+// this takes the captured stderr text directly: writeIfAbsent's underlying
+// doWrite runs cmd.Run() with cmd.Stderr redirected to its own buffer, so
+// cmd.Run's *exec.ExitError never gets its Stderr field populated the way
+// Output() populates it.
+func isDuplicateItem(err error, stderr string) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	if exitErr.ExitCode() == duplicateItemExit {
+		return true
+	}
+	return strings.Contains(stderr, duplicateItemStderrMessage)
 }

@@ -7,7 +7,9 @@
 // overwrites on Set, so a concurrent writer between a caller's presence
 // check and its Set is clobbered with no error to either side. Has is
 // advisory, not a compare-and-swap; this package assumes one writer per
-// account. See Has.
+// account unless callers serialize writes per (service, account) themselves
+// or use SetIfAbsent, which offers write-once semantics instead. See Has,
+// SetIfAbsent.
 //
 // PRECONDITION: exactly one (service, account) item across the keychain
 // search list, or a pinned keychain. `find-generic-password` returns the
@@ -74,6 +76,11 @@ var (
 	// value that Set never touched. Retry Get (or Has) to resolve the
 	// uncertainty instead.
 	ErrVerifyFailed = errors.New("read-back verification failed")
+	// ErrExists means SetIfAbsent found an item already present under this
+	// account. The write was rejected outright, not attempted: the existing
+	// value is untouched. Contrast ErrVerifyFailed, which fires AFTER a write
+	// attempt and is indeterminate about whether that write landed.
+	ErrExists = errors.New("item already exists")
 	// ErrUnsupported means no keychain backend is compiled into this binary
 	// (any non-darwin build).
 	ErrUnsupported = errors.New("keychain not supported on this platform")
@@ -245,6 +252,13 @@ func (s *Store) Get(account string) (string, error) {
 // return is therefore INDETERMINATE, not confirmation the value was never
 // stored — see ErrVerifyFailed. Callers must treat it as "unknown, go check"
 // (Get/Has), never as "not written".
+//
+// Set always writes with -U (update-if-exists): a concurrent writer landing
+// between another caller's presence check and its Set is silently clobbered,
+// no error to either side (see Has). Callers needing cross-process integrity
+// — no two writers racing to the same account — must either serialize writes
+// per (service, account) themselves, or use SetIfAbsent for write-once
+// semantics.
 func (s *Store) Set(account, value string) error {
 	if disabled() {
 		return errDisabled()
@@ -271,6 +285,50 @@ func (s *Store) Set(account, value string) error {
 	return nil
 }
 
+// SetIfAbsent stores value under account only if no item currently exists
+// there — the write-once primitive for callers (bootstrap, token refresh)
+// that need protection against a concurrent writer clobbering a value that's
+// already in place, the gap Set's unconditional -U leaves open (see Set,
+// Has). It skips -U: `security add-generic-password` then fails with a
+// duplicate-item error when the item already exists, which SetIfAbsent maps
+// to ErrExists instead of overwriting. On confirmed absence it stores and
+// read-backs verify, exactly like Set — including ErrVerifyFailed's
+// INDETERMINATE semantics (see Set, ErrVerifyFailed). Same validation as
+// Set: non-empty account, printable ASCII account and value. Honors
+// WithKeychain the same way Set's write path does.
+//
+// SetIfAbsent is write-once, not a distributed lock: `security`'s
+// duplicate-item check runs against whatever is already committed in the
+// keychain at call time, so two callers racing SetIfAbsent for the same
+// account cannot both win — exactly one gets nil, the other ErrExists — but
+// it makes no ordering promise about WHICH one wins, only that the loser
+// never clobbers the winner's value.
+func (s *Store) SetIfAbsent(account, value string) error {
+	if disabled() {
+		return errDisabled()
+	}
+	if strings.TrimSpace(account) == "" {
+		return errors.New("keyring: account name must not be empty")
+	}
+	if err := printableASCIIOnly("account", account); err != nil {
+		return err
+	}
+	if err := printableASCIIOnlySecret("value", value); err != nil {
+		return err
+	}
+	if err := s.writeIfAbsent(account, value); err != nil {
+		return err
+	}
+	got, err := s.get(account)
+	if err != nil {
+		return fmt.Errorf("keyring: read-back after storing %q: %w: %w (is the keychain locked?)", account, ErrVerifyFailed, err)
+	}
+	if got != value {
+		return fmt.Errorf("keyring: read-back of %q: %w: stored value does not match", account, ErrVerifyFailed)
+	}
+	return nil
+}
+
 // Has reports whether a value is stored under account, returning an error the
 // caller MUST block on. The three outcomes are distinct:
 //   - (true, nil)  — the value was present at the moment of this read.
@@ -285,10 +343,10 @@ func (s *Store) Set(account, value string) error {
 // window between this call and a following Set is silently overwritten —
 // no error to either caller. The `security` CLI has no compare-and-swap;
 // this package cannot offer one. Treat (false, nil) as "no value seen just
-// now", and rely on it only when the account has a single writer. A future
-// SetIfAbsent (skip -U, map errSecDuplicateItem/exit 45 to a sentinel) could
-// close this gap for a single process, but that guard would still need to
-// live with the caller, not here.
+// now", and rely on it only when the account has a single writer — or skip
+// the Has-then-Set pair entirely and call SetIfAbsent, which closes exactly
+// this gap by skipping -U and mapping the resulting duplicate-item error to
+// ErrExists.
 func (s *Store) Has(account string) (bool, error) {
 	_, err := s.Get(account)
 	switch {

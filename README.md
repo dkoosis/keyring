@@ -36,6 +36,25 @@ The not-found/unreadable split is a best-effort classification of the Darwin
 `security` CLI (exit status + stderr text). It is reliable on stock macOS,
 but it is a CLI heuristic, not an OS guarantee.
 
+## Set vs. SetIfAbsent
+
+`Set` writes with `-U` (update-if-exists) — it always succeeds against an
+existing item, silently overwriting it. A concurrent writer landing between
+another caller's presence check (`Has`) and its own `Set` is clobbered with
+no error to either side; this package has no compare-and-swap, and `Has` is
+advisory only (see Guarantees #4). Callers that need cross-process
+integrity — no two writers racing to the same account — must either
+serialize writes per (service, account) themselves, or use `SetIfAbsent`.
+
+`SetIfAbsent` is the write-once primitive: it skips `-U`, so
+`add-generic-password` fails with a confirmed duplicate-item error
+(`errSecDuplicateItem`, exit 45) against an existing item instead of
+overwriting it. That failure maps to `ErrExists`; on confirmed absence it
+stores and read-back verifies exactly like `Set`. Use it for bootstrap or
+token-refresh flows where two processes might race to initialize the same
+account and only one write should win — the loser gets `ErrExists`, never a
+clobber.
+
 ## Non-darwin
 
 On non-darwin builds `Supported()` returns false and every keychain

@@ -17,3 +17,7 @@ func (s *Store) get(account string) (string, error) {
 func (s *Store) write(account, _ string) error {
 	return fmt.Errorf("keyring: storing %q under service %q: %w", account, s.service, ErrUnsupported)
 }
+
+func (s *Store) writeIfAbsent(account, _ string) error {
+	return fmt.Errorf("keyring: storing %q under service %q: %w", account, s.service, ErrUnsupported)
+}

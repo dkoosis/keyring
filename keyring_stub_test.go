@@ -18,6 +18,9 @@ func TestStub_AllOpsReturnUnsupported(t *testing.T) {
 	if err := s.Set("a", "v"); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("Set: want ErrUnsupported, got %v", err)
 	}
+	if err := s.SetIfAbsent("a", "v"); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("SetIfAbsent: want ErrUnsupported, got %v", err)
+	}
 	if _, err := s.Has("a"); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("Has: want ErrUnsupported err, got %v", err)
 	}
